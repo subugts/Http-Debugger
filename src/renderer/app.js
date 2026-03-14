@@ -1,0 +1,1687 @@
+/**
+ * HTTP Debugger - Main Application Logic
+ * Handles UI, sessions, viewers, charts, filtering, and all interactive features
+ */
+
+// ============================
+// State
+// ============================
+let allSessions = [];
+let filteredSessions = [];
+let selectedSession = null;
+let currentFilter = 'all';
+let currentMethodFilter = 'all';
+let currentSearch = '';
+let sortColumn = 'number';
+let sortDirection = 'asc';
+let settings = {};
+let isCapturing = false;
+let currentDetailTab = 'summary';
+let currentChartType = 'timing';
+
+// ============================
+// Initialization
+// ============================
+document.addEventListener('DOMContentLoaded', async () => {
+  settings = await window.api.getSettings();
+  applyTheme(settings.theme);
+  
+  setupToolbar();
+  setupFilters();
+  setupDetailTabs();
+  setupResize();
+  setupModals();
+  setupComposer();
+  setupConverter();
+  setupCharts();
+  setupRules();
+  setupSettings();
+  setupResubmit();
+  setupContextMenu();
+  setupKeyboardShortcuts();
+  
+  // IPC listeners
+  window.api.onNewSession(handleNewSession);
+  window.api.onCaptureStatus(handleCaptureStatus);
+  window.api.onSessionsCleared(handleSessionsCleared);
+  window.api.onSessionsLoaded(handleSessionsLoaded);
+  window.api.onThemeChanged(applyTheme);
+  window.api.onShowComposer(() => showModal('modal-composer'));
+  window.api.onShowConverter(() => showModal('modal-converter'));
+  window.api.onShowRules(() => showModal('modal-rules'));
+  window.api.onShowCharts(() => showModal('modal-charts'));
+  window.api.onShowSettings(() => showModal('modal-settings'));
+
+  // Load existing sessions
+  const existing = await window.api.getSessions();
+  if (existing && existing.length > 0) {
+    allSessions = existing;
+    applyFilters();
+  }
+
+  const status = await window.api.getCaptureStatus();
+  handleCaptureStatus(status);
+});
+
+// ============================
+// Theme
+// ============================
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+}
+
+// ============================
+// Toolbar
+// ============================
+function setupToolbar() {
+  document.getElementById('btn-capture').addEventListener('click', startCapture);
+  document.getElementById('btn-stop').addEventListener('click', stopCapture);
+  document.getElementById('btn-clear').addEventListener('click', clearAll);
+  document.getElementById('btn-compose').addEventListener('click', () => showModal('modal-composer'));
+  document.getElementById('btn-resubmit').addEventListener('click', openResubmit);
+  document.getElementById('btn-charts').addEventListener('click', () => {
+    showModal('modal-charts');
+    renderChart(currentChartType);
+  });
+  document.getElementById('btn-converter').addEventListener('click', () => showModal('modal-converter'));
+  document.getElementById('btn-rules').addEventListener('click', () => showModal('modal-rules'));
+  document.getElementById('btn-save').addEventListener('click', () => window.api.saveSession());
+  document.getElementById('btn-open').addEventListener('click', () => window.api.openSession());
+  document.getElementById('btn-theme').addEventListener('click', toggleTheme);
+
+  // Export dropdown
+  const exportBtn = document.getElementById('btn-export');
+  const exportMenu = document.getElementById('export-menu');
+  exportBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exportMenu.classList.toggle('show');
+  });
+  
+  document.querySelectorAll('.dropdown-item').forEach(item => {
+    item.addEventListener('click', () => {
+      window.api.exportData(item.dataset.format);
+      exportMenu.classList.remove('show');
+    });
+  });
+
+  document.addEventListener('click', () => {
+    exportMenu.classList.remove('show');
+  });
+
+  // Search
+  const searchInput = document.getElementById('search-input');
+  const searchClear = document.getElementById('search-clear');
+  searchInput.addEventListener('input', () => {
+    currentSearch = searchInput.value.trim();
+    searchClear.classList.toggle('visible', currentSearch.length > 0);
+    applyFilters();
+  });
+  searchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    currentSearch = '';
+    searchClear.classList.remove('visible');
+    applyFilters();
+  });
+
+  // Column sorting
+  document.querySelectorAll('.th').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      if (sortColumn === col) {
+        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortColumn = col;
+        sortDirection = 'asc';
+      }
+      document.querySelectorAll('.th').forEach(t => t.classList.remove('sorted-asc', 'sorted-desc'));
+      th.classList.add(sortDirection === 'asc' ? 'sorted-asc' : 'sorted-desc');
+      applyFilters();
+    });
+  });
+}
+
+// ============================
+// Capture Control
+// ============================
+async function startCapture() {
+  const result = await window.api.startCapture();
+  if (!result.success) {
+    alert(`Failed to start capture: ${result.error}`);
+  }
+}
+
+async function stopCapture() {
+  await window.api.stopCapture();
+}
+
+async function clearAll() {
+  await window.api.clearSessions();
+}
+
+function handleCaptureStatus(status) {
+  isCapturing = status.isCapturing;
+  const captureBtn = document.getElementById('btn-capture');
+  const stopBtn = document.getElementById('btn-stop');
+  const statusEl = document.getElementById('capture-status');
+  const sbStatus = document.getElementById('sb-status');
+  const sbProxy = document.getElementById('sb-proxy');
+
+  if (isCapturing) {
+    captureBtn.disabled = true;
+    captureBtn.classList.remove('primary');
+    stopBtn.disabled = false;
+    statusEl.innerHTML = '<span class="status-dot running"></span><span class="status-text">Capturing on :' + (status.port || settings.proxyPort) + '</span>';
+    sbStatus.textContent = 'Capturing...';
+  } else {
+    captureBtn.disabled = false;
+    captureBtn.classList.add('primary');
+    stopBtn.disabled = true;
+    statusEl.innerHTML = '<span class="status-dot stopped"></span><span class="status-text">Stopped</span>';
+    sbStatus.textContent = 'Ready';
+  }
+  sbProxy.textContent = `Proxy: 127.0.0.1:${status.port || settings.proxyPort}`;
+  document.getElementById('proxy-port').textContent = status.port || settings.proxyPort;
+}
+
+// ============================
+// Session Handling
+// ============================
+function handleNewSession(session) {
+  allSessions.push(session);
+  applyFilters();
+  updateStats();
+
+  if (settings.autoScroll) {
+    const list = document.getElementById('request-list');
+    list.scrollTop = list.scrollHeight;
+  }
+}
+
+function handleSessionsCleared() {
+  allSessions = [];
+  filteredSessions = [];
+  selectedSession = null;
+  renderRequestList();
+  renderDetail();
+  updateStats();
+  document.getElementById('empty-state').classList.remove('hidden');
+}
+
+function handleSessionsLoaded(sessions) {
+  allSessions = sessions;
+  applyFilters();
+  updateStats();
+}
+
+// ============================
+// Filtering & Sorting
+// ============================
+function setupFilters() {
+  document.querySelectorAll('.filter-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      currentFilter = chip.dataset.filter;
+      applyFilters();
+    });
+  });
+
+  document.querySelectorAll('.method-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      currentMethodFilter = chip.dataset.method;
+      applyFilters();
+    });
+  });
+}
+
+function applyFilters() {
+  filteredSessions = allSessions.filter(session => {
+    // Content type filter
+    if (currentFilter !== 'all' && session.contentType !== currentFilter) {
+      if (currentFilter === 'xhr') {
+        if (!['json', 'xml', 'text'].includes(session.contentType)) return false;
+      } else {
+        return false;
+      }
+    }
+
+    // Method filter
+    if (currentMethodFilter !== 'all' && session.method !== currentMethodFilter) {
+      return false;
+    }
+
+    // Search filter
+    if (currentSearch) {
+      const searchLower = currentSearch.toLowerCase();
+      const matchFields = [
+        session.url,
+        session.host,
+        session.path,
+        session.method,
+        session.statusCode?.toString(),
+        session.contentType,
+        session.mimeType
+      ];
+      if (!matchFields.some(f => f && f.toLowerCase().includes(searchLower))) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  // Sort
+  filteredSessions.sort((a, b) => {
+    let aVal = a[sortColumn];
+    let bVal = b[sortColumn];
+    if (typeof aVal === 'string') aVal = aVal.toLowerCase();
+    if (typeof bVal === 'string') bVal = bVal.toLowerCase();
+    if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+    if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  renderRequestList();
+}
+
+// ============================
+// Request List Rendering
+// ============================
+function renderRequestList() {
+  const list = document.getElementById('request-list');
+  const emptyState = document.getElementById('empty-state');
+
+  if (filteredSessions.length === 0) {
+    // Clear existing rows but keep empty state
+    const rows = list.querySelectorAll('.request-row');
+    rows.forEach(r => r.remove());
+    emptyState.classList.remove('hidden');
+    return;
+  }
+
+  emptyState.classList.add('hidden');
+
+  // For performance with large lists, use virtual scrolling concept
+  // But for simplicity, directly render (with limit for very large lists)
+  const fragment = document.createDocumentFragment();
+  const maxRender = Math.min(filteredSessions.length, 5000);
+
+  for (let i = 0; i < maxRender; i++) {
+    const session = filteredSessions[i];
+    const row = createRequestRow(session);
+    fragment.appendChild(row);
+  }
+
+  // Clear existing rows
+  const existingRows = list.querySelectorAll('.request-row');
+  existingRows.forEach(r => r.remove());
+
+  list.appendChild(fragment);
+  updateStats();
+}
+
+function createRequestRow(session) {
+  const row = document.createElement('div');
+  row.className = 'request-row';
+  row.dataset.id = session.id;
+
+  // Highlight classes
+  if (settings.highlightErrors && session.statusCode >= 400) {
+    row.classList.add('error-row');
+  }
+  if (settings.highlightSlowRequests && session.duration > settings.slowRequestThreshold) {
+    row.classList.add('slow-row');
+  }
+  if (session.responseSize > settings.largeRequestThreshold) {
+    row.classList.add('large-row');
+  }
+
+  if (selectedSession && selectedSession.id === session.id) {
+    row.classList.add('selected');
+  }
+
+  const statusClass = getStatusClass(session.statusCode);
+  const methodClass = `method-${session.method}`;
+
+  row.innerHTML = `
+    <div class="td td-number">${session.number || ''}</div>
+    <div class="td td-status ${statusClass}">${session.statusCode || '—'}</div>
+    <div class="td td-method ${methodClass}">${session.method}</div>
+    <div class="td td-protocol">${session.protocol || 'HTTP'}</div>
+    <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
+    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
+    <div class="td td-type">${session.contentType || ''}</div>
+    <div class="td td-size">${formatBytes(session.responseSize)}</div>
+    <div class="td td-time">${formatDuration(session.duration)}</div>
+  `;
+
+  row.addEventListener('click', () => selectSession(session, row));
+  row.addEventListener('dblclick', () => openResubmitForSession(session));
+  row.addEventListener('contextmenu', (e) => showContextMenu(e, session));
+
+  return row;
+}
+
+function selectSession(session, row) {
+  selectedSession = session;
+  
+  document.querySelectorAll('.request-row.selected').forEach(r => r.classList.remove('selected'));
+  if (row) row.classList.add('selected');
+
+  document.getElementById('btn-resubmit').disabled = false;
+  renderDetail();
+}
+
+// ============================
+// Detail Views
+// ============================
+function setupDetailTabs() {
+  document.querySelectorAll('.detail-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentDetailTab = tab.dataset.tab;
+      renderDetail();
+    });
+  });
+}
+
+function renderDetail() {
+  const content = document.getElementById('detail-content');
+  
+  if (!selectedSession) {
+    content.innerHTML = '<div class="detail-empty"><p>Select a request to view details</p></div>';
+    return;
+  }
+
+  switch (currentDetailTab) {
+    case 'summary':
+      content.innerHTML = renderSummary(selectedSession);
+      break;
+    case 'request-headers':
+      content.innerHTML = renderHeaders(selectedSession.requestHeaders, 'Request');
+      break;
+    case 'response-headers':
+      content.innerHTML = renderHeaders(selectedSession.responseHeaders, 'Response');
+      break;
+    case 'request-body':
+      content.innerHTML = renderBody(selectedSession.requestBody, selectedSession.requestHeaders?.['content-type']);
+      break;
+    case 'response-body':
+      content.innerHTML = renderBody(selectedSession.responseBody, selectedSession.responseHeaders?.['content-type']);
+      break;
+    case 'cookies':
+      content.innerHTML = renderCookies(selectedSession);
+      break;
+    case 'params':
+      content.innerHTML = renderParams(selectedSession);
+      break;
+    case 'timing':
+      content.innerHTML = renderTiming(selectedSession);
+      break;
+  }
+}
+
+function renderSummary(session) {
+  let html = '<div class="summary-grid">';
+  
+  html += summaryRow('URL', session.url);
+  html += summaryRow('Method', `<span class="method-${session.method}">${session.method}</span>`);
+  html += summaryRow('Status', `<span class="${getStatusClass(session.statusCode)} summary-value status">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
+  html += summaryRow('Protocol', session.protocol);
+  html += summaryRow('Host', session.host);
+  html += summaryRow('Path', session.path);
+  html += summaryRow('Content-Type', session.mimeType || '—');
+  html += summaryRow('Request Size', formatBytes(session.requestSize));
+  html += summaryRow('Response Size', formatBytes(session.responseSize));
+  html += summaryRow('Duration', formatDuration(session.duration));
+  html += summaryRow('Timestamp', session.timestamp ? new Date(session.timestamp).toLocaleString() : '—');
+  
+  if (session.error) {
+    html += summaryRow('Error', `<span class="text-error">${escapeHtml(session.error)}</span>`);
+  }
+  if (session.isTunnel) {
+    html += summaryRow('Type', '<span class="badge badge-info">HTTPS Tunnel</span>');
+  }
+  if (session.isComposed) {
+    html += summaryRow('Source', '<span class="badge badge-info">Composed</span>');
+  }
+  if (session.isRedirected) {
+    html += summaryRow('Redirected From', session.originalUrl || '—');
+  }
+  if (session.isBlocked) {
+    html += summaryRow('Status', '<span class="badge badge-error">Blocked by Rule</span>');
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function summaryRow(label, value) {
+  return `<div class="summary-label">${label}:</div><div class="summary-value">${value}</div>`;
+}
+
+function renderHeaders(headers, type) {
+  if (!headers || Object.keys(headers).length === 0) {
+    return `<div class="detail-empty"><p>No ${type} headers</p></div>`;
+  }
+
+  let html = '<table class="headers-table">';
+  for (const [key, value] of Object.entries(headers)) {
+    const displayValue = Array.isArray(value) ? value.join(', ') : value;
+    html += `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(String(displayValue))}</td></tr>`;
+  }
+  html += '</table>';
+  return html;
+}
+
+function renderBody(body, contentType) {
+  if (!body) {
+    return '<div class="detail-empty"><p>No body content</p></div>';
+  }
+
+  const ct = (contentType || '').toLowerCase();
+  
+  // JSON viewer
+  if (ct.includes('json') || looksLikeJSON(body)) {
+    try {
+      const parsed = JSON.parse(body);
+      return `<div class="code-view">${syntaxHighlightJSON(JSON.stringify(parsed, null, 2))}</div>`;
+    } catch (e) {
+      // Not valid JSON, show as text
+    }
+  }
+
+  // XML viewer
+  if (ct.includes('xml') || body.trim().startsWith('<?xml') || body.trim().startsWith('<')) {
+    if (body.trim().startsWith('<')) {
+      return `<div class="code-view">${syntaxHighlightXML(body)}</div>`;
+    }
+  }
+
+  // HTML viewer
+  if (ct.includes('html')) {
+    return `<div class="code-view">${syntaxHighlightHTML(body)}</div>`;
+  }
+
+  // Default text view
+  return `<div class="code-view">${escapeHtml(body)}</div>`;
+}
+
+function renderCookies(session) {
+  const cookies = [];
+  
+  // Request cookies
+  const reqCookie = session.requestHeaders?.['cookie'] || session.requestHeaders?.['Cookie'];
+  if (reqCookie) {
+    reqCookie.split(';').forEach(c => {
+      const [name, ...valueParts] = c.trim().split('=');
+      cookies.push({ name: name.trim(), value: valueParts.join('='), source: 'Request' });
+    });
+  }
+
+  // Response Set-Cookie
+  const setCookie = session.responseHeaders?.['set-cookie'];
+  if (setCookie) {
+    const cookieArray = Array.isArray(setCookie) ? setCookie : [setCookie];
+    cookieArray.forEach(c => {
+      const parts = c.split(';');
+      const [name, ...valueParts] = parts[0].split('=');
+      const attrs = parts.slice(1).map(p => p.trim()).join('; ');
+      cookies.push({
+        name: name.trim(),
+        value: valueParts.join('='),
+        attributes: attrs,
+        source: 'Response'
+      });
+    });
+  }
+
+  if (cookies.length === 0) {
+    return '<div class="detail-empty"><p>No cookies found</p></div>';
+  }
+
+  let html = '<table class="cookies-table">';
+  html += '<tr><th>Source</th><th>Name</th><th>Value</th><th>Attributes</th></tr>';
+  cookies.forEach(c => {
+    html += `<tr><td><span class="badge badge-info">${c.source}</span></td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.value || '')}</td><td>${escapeHtml(c.attributes || '')}</td></tr>`;
+  });
+  html += '</table>';
+  return html;
+}
+
+function renderParams(session) {
+  const params = [];
+  
+  try {
+    const urlObj = new URL(session.url);
+    urlObj.searchParams.forEach((value, key) => {
+      params.push({ key, value, source: 'Query' });
+    });
+  } catch (e) {
+    // Try to extract query params manually
+    const queryString = session.url?.split('?')[1];
+    if (queryString) {
+      queryString.split('&').forEach(pair => {
+        const [key, ...valueParts] = pair.split('=');
+        params.push({ key: decodeURIComponent(key), value: decodeURIComponent(valueParts.join('=')), source: 'Query' });
+      });
+    }
+  }
+
+  // Form body params
+  const ct = session.requestHeaders?.['content-type'] || '';
+  if (ct.includes('form-urlencoded') && session.requestBody) {
+    session.requestBody.split('&').forEach(pair => {
+      const [key, ...valueParts] = pair.split('=');
+      try {
+        params.push({
+          key: decodeURIComponent(key),
+          value: decodeURIComponent(valueParts.join('=')),
+          source: 'Body'
+        });
+      } catch (e) {
+        params.push({ key, value: valueParts.join('='), source: 'Body' });
+      }
+    });
+  }
+
+  if (params.length === 0) {
+    return '<div class="detail-empty"><p>No parameters found</p></div>';
+  }
+
+  let html = '<table class="params-table">';
+  html += '<tr><th>Source</th><th>Parameter</th><th>Value</th></tr>';
+  params.forEach(p => {
+    html += `<tr><td><span class="badge badge-info">${p.source}</span></td><td>${escapeHtml(p.key)}</td><td>${escapeHtml(p.value)}</td></tr>`;
+  });
+  html += '</table>';
+  return html;
+}
+
+function renderTiming(session) {
+  if (!session.duration) {
+    return '<div class="detail-empty"><p>No timing data available</p></div>';
+  }
+
+  const total = session.duration;
+  // Estimate timing phases (real implementation would need actual measurements)
+  const dns = Math.min(total * 0.05, 50);
+  const connect = Math.min(total * 0.1, 100);
+  const tlsTime = session.protocol === 'HTTPS' ? Math.min(total * 0.15, 150) : 0;
+  const waiting = total * 0.5;
+  const receiving = total - dns - connect - tlsTime - waiting;
+
+  let html = '<div style="max-width: 600px;">';
+  html += '<h4 style="margin-bottom: 16px; color: var(--text-accent);">Request Timing Breakdown</h4>';
+  
+  html += timingBar('DNS Lookup', dns, total, 'dns');
+  html += timingBar('TCP Connect', connect, total, 'connect');
+  if (tlsTime > 0) {
+    html += timingBar('TLS Handshake', tlsTime, total, 'tls');
+  }
+  html += timingBar('Server Wait (TTFB)', waiting, total, 'waiting');
+  html += timingBar('Content Download', receiving, total, 'receiving');
+  html += timingBar('Total', total, total, 'total');
+
+  html += '</div>';
+  return html;
+}
+
+function timingBar(label, value, total, className) {
+  const pct = total > 0 ? (value / total * 100) : 0;
+  return `
+    <div class="timing-bar-container">
+      <div class="timing-bar-label">
+        <span>${label}</span>
+        <span>${Math.round(value)}ms</span>
+      </div>
+      <div class="timing-bar">
+        <div class="timing-bar-fill ${className}" style="width: ${Math.max(pct, 1)}%"></div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================
+// Syntax Highlighting
+// ============================
+function syntaxHighlightJSON(json) {
+  return escapeHtml(json).replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (match) => {
+      let cls = 'number';
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) {
+          cls = 'key';
+          match = match.replace(/:$/, '') + ':';
+        } else {
+          cls = 'string';
+        }
+      } else if (/true|false/.test(match)) {
+        cls = 'boolean';
+      } else if (/null/.test(match)) {
+        cls = 'null';
+      }
+      return `<span class="${cls}">${match}</span>`;
+    }
+  );
+}
+
+function syntaxHighlightXML(xml) {
+  let highlighted = escapeHtml(xml);
+  // Tags
+  highlighted = highlighted.replace(/(&lt;\/?[a-zA-Z][a-zA-Z0-9-]*)/g, '<span class="tag">$1</span>');
+  // Attributes
+  highlighted = highlighted.replace(/(\s[a-zA-Z-]+)(=)/g, '<span class="attr-name">$1</span>$2');
+  // Attribute values
+  highlighted = highlighted.replace(/(=)(&quot;[^&]*&quot;)/g, '$1<span class="attr-value">$2</span>');
+  // Comments
+  highlighted = highlighted.replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span class="comment">$1</span>');
+  return highlighted;
+}
+
+function syntaxHighlightHTML(html) {
+  return syntaxHighlightXML(html);
+}
+
+// ============================
+// Resize
+// ============================
+function setupResize() {
+  const handle = document.getElementById('resize-handle-h');
+  const panelList = document.getElementById('panel-list');
+  const panelDetail = document.getElementById('panel-detail');
+  let isResizing = false;
+  let startY = 0;
+  let startListHeight = 0;
+  let startDetailHeight = 0;
+
+  handle.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    startY = e.clientY;
+    startListHeight = panelList.offsetHeight;
+    startDetailHeight = panelDetail.offsetHeight;
+    handle.classList.add('active');
+    document.body.style.cursor = 'row-resize';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const dy = e.clientY - startY;
+    const newListHeight = Math.max(150, startListHeight + dy);
+    const newDetailHeight = Math.max(100, startDetailHeight - dy);
+    panelList.style.flex = 'none';
+    panelList.style.height = newListHeight + 'px';
+    panelDetail.style.height = newDetailHeight + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isResizing) {
+      isResizing = false;
+      handle.classList.remove('active');
+      document.body.style.cursor = '';
+    }
+  });
+}
+
+// ============================
+// Modals
+// ============================
+function setupModals() {
+  document.querySelectorAll('.modal-close').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const modalId = btn.dataset.close;
+      hideModal(modalId);
+    });
+  });
+
+  document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        overlay.classList.remove('show');
+      }
+    });
+  });
+}
+
+function showModal(id) {
+  document.getElementById(id).classList.add('show');
+}
+
+function hideModal(id) {
+  document.getElementById(id).classList.remove('show');
+}
+
+// ============================
+// Composer
+// ============================
+function setupComposer() {
+  // Tabs
+  document.querySelectorAll('.composer-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.composer-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.composer-panel').forEach(p => p.classList.add('hidden'));
+      tab.classList.add('active');
+      document.getElementById(`ctab-${tab.dataset.ctab}`).classList.remove('hidden');
+    });
+  });
+
+  // Add header row
+  document.getElementById('add-header-row').addEventListener('click', () => {
+    const editor = document.getElementById('composer-headers');
+    const row = document.createElement('div');
+    row.className = 'kv-row';
+    row.innerHTML = `
+      <input type="text" placeholder="Header name" class="kv-key">
+      <input type="text" placeholder="Header value" class="kv-value">
+      <button class="kv-remove" title="Remove">✕</button>
+    `;
+    row.querySelector('.kv-remove').addEventListener('click', () => row.remove());
+    editor.appendChild(row);
+  });
+
+  // Remove header handlers
+  document.querySelectorAll('.kv-remove').forEach(btn => {
+    btn.addEventListener('click', () => btn.parentElement.remove());
+  });
+
+  // Auth type change
+  document.getElementById('auth-type').addEventListener('change', (e) => {
+    const fields = document.getElementById('auth-fields');
+    switch (e.target.value) {
+      case 'bearer':
+        fields.innerHTML = '<input type="text" placeholder="Bearer Token" id="auth-token">';
+        break;
+      case 'basic':
+        fields.innerHTML = '<input type="text" placeholder="Username" id="auth-user"><input type="password" placeholder="Password" id="auth-pass">';
+        break;
+      case 'api-key':
+        fields.innerHTML = '<input type="text" placeholder="Header Name" id="auth-key-name" value="X-API-Key"><input type="text" placeholder="API Key" id="auth-key-value">';
+        break;
+      default:
+        fields.innerHTML = '';
+    }
+  });
+
+  // Send button
+  document.getElementById('composer-send').addEventListener('click', sendComposedRequest);
+}
+
+async function sendComposedRequest() {
+  const method = document.getElementById('composer-method').value;
+  const url = document.getElementById('composer-url').value;
+
+  if (!url) {
+    alert('Please enter a URL');
+    return;
+  }
+
+  // Collect headers
+  const headers = {};
+  document.querySelectorAll('#composer-headers .kv-row').forEach(row => {
+    const key = row.querySelector('.kv-key').value.trim();
+    const value = row.querySelector('.kv-value').value.trim();
+    if (key) headers[key] = value;
+  });
+
+  // Auth
+  const authType = document.getElementById('auth-type').value;
+  if (authType === 'bearer') {
+    const token = document.getElementById('auth-token')?.value;
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+  } else if (authType === 'basic') {
+    const user = document.getElementById('auth-user')?.value || '';
+    const pass = document.getElementById('auth-pass')?.value || '';
+    headers['Authorization'] = `Basic ${btoa(user + ':' + pass)}`;
+  } else if (authType === 'api-key') {
+    const keyName = document.getElementById('auth-key-name')?.value || 'X-API-Key';
+    const keyValue = document.getElementById('auth-key-value')?.value || '';
+    if (keyValue) headers[keyName] = keyValue;
+  }
+
+  // Body
+  const bodyType = document.querySelector('input[name="body-type"]:checked')?.value;
+  let body = null;
+  if (bodyType !== 'none') {
+    body = document.getElementById('composer-body').value;
+  }
+
+  const sendBtn = document.getElementById('composer-send');
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending...';
+
+  const result = await window.api.sendRequest({ method, url, headers, body });
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+
+  const responseEl = document.getElementById('composer-response');
+  if (result.success) {
+    const session = result.session;
+    responseEl.innerHTML = `
+      <h4 style="color: var(--text-accent); margin-bottom: 8px;">Response</h4>
+      <div class="summary-grid" style="margin-bottom: 12px;">
+        ${summaryRow('Status', `<span class="${getStatusClass(session.statusCode)}">${session.statusCode} ${session.statusMessage}</span>`)}
+        ${summaryRow('Time', formatDuration(session.duration))}
+        ${summaryRow('Size', formatBytes(session.responseSize))}
+      </div>
+      <div class="code-view" style="max-height: 300px; overflow: auto;">${
+        session.responseBody ? (looksLikeJSON(session.responseBody) ? syntaxHighlightJSON(tryPrettifyJSON(session.responseBody)) : escapeHtml(session.responseBody)) : '(empty response)'
+      }</div>
+    `;
+  } else {
+    responseEl.innerHTML = `<div class="text-error" style="padding: 12px;">Error: ${escapeHtml(result.error)}</div>`;
+  }
+}
+
+// ============================
+// Resubmit
+// ============================
+function setupResubmit() {
+  document.getElementById('resubmit-send').addEventListener('click', resubmitRequest);
+}
+
+function openResubmit() {
+  if (!selectedSession) return;
+  openResubmitForSession(selectedSession);
+}
+
+function openResubmitForSession(session) {
+  document.getElementById('resubmit-method').value = session.method || 'GET';
+  document.getElementById('resubmit-url').value = session.url || '';
+  
+  // Format headers
+  const headers = Object.entries(session.requestHeaders || {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+  document.getElementById('resubmit-headers').value = headers;
+  document.getElementById('resubmit-body').value = session.requestBody || '';
+  document.getElementById('resubmit-response').innerHTML = '';
+  
+  showModal('modal-resubmit');
+}
+
+async function resubmitRequest() {
+  const method = document.getElementById('resubmit-method').value;
+  const url = document.getElementById('resubmit-url').value;
+  
+  const headers = {};
+  document.getElementById('resubmit-headers').value.split('\n').forEach(line => {
+    const idx = line.indexOf(':');
+    if (idx > 0) {
+      headers[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+    }
+  });
+
+  const body = document.getElementById('resubmit-body').value || null;
+
+  const sendBtn = document.getElementById('resubmit-send');
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending...';
+
+  const result = await window.api.resubmitSession({ method, url, headers, body });
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+
+  const responseEl = document.getElementById('resubmit-response');
+  if (result.success) {
+    const session = result.session;
+    responseEl.innerHTML = `
+      <h4 style="color: var(--text-accent); margin-bottom: 8px;">Response</h4>
+      <div class="summary-grid" style="margin-bottom: 12px;">
+        ${summaryRow('Status', `<span class="${getStatusClass(session.statusCode)}">${session.statusCode} ${session.statusMessage}</span>`)}
+        ${summaryRow('Time', formatDuration(session.duration))}
+        ${summaryRow('Size', formatBytes(session.responseSize))}
+      </div>
+      <div class="code-view" style="max-height: 300px; overflow: auto;">${
+        session.responseBody ? (looksLikeJSON(session.responseBody) ? syntaxHighlightJSON(tryPrettifyJSON(session.responseBody)) : escapeHtml(session.responseBody)) : '(empty response)'
+      }</div>
+    `;
+  } else {
+    responseEl.innerHTML = `<div class="text-error" style="padding: 12px;">Error: ${escapeHtml(result.error)}</div>`;
+  }
+}
+
+// ============================
+// Data Converter
+// ============================
+function setupConverter() {
+  const input = document.getElementById('converter-input');
+  const output = document.getElementById('converter-output');
+
+  document.getElementById('url-encode').addEventListener('click', () => {
+    output.value = encodeURIComponent(input.value);
+  });
+  document.getElementById('url-decode').addEventListener('click', () => {
+    try { output.value = decodeURIComponent(input.value); }
+    catch (e) { output.value = 'Error: Invalid URL encoding'; }
+  });
+  document.getElementById('base64-encode').addEventListener('click', () => {
+    try { output.value = btoa(unescape(encodeURIComponent(input.value))); }
+    catch (e) { output.value = 'Error: Could not encode'; }
+  });
+  document.getElementById('base64-decode').addEventListener('click', () => {
+    try { output.value = decodeURIComponent(escape(atob(input.value))); }
+    catch (e) { output.value = 'Error: Invalid Base64'; }
+  });
+  document.getElementById('hex-encode').addEventListener('click', () => {
+    output.value = Array.from(input.value).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
+  });
+  document.getElementById('hex-decode').addEventListener('click', () => {
+    try {
+      output.value = input.value.replace(/\s/g, '').match(/.{1,2}/g).map(h => String.fromCharCode(parseInt(h, 16))).join('');
+    } catch (e) { output.value = 'Error: Invalid Hex'; }
+  });
+  document.getElementById('html-encode').addEventListener('click', () => {
+    output.value = input.value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  });
+  document.getElementById('html-decode').addEventListener('click', () => {
+    const el = document.createElement('textarea');
+    el.innerHTML = input.value;
+    output.value = el.value;
+  });
+  document.getElementById('json-prettify').addEventListener('click', () => {
+    try { output.value = JSON.stringify(JSON.parse(input.value), null, 2); }
+    catch (e) { output.value = 'Error: Invalid JSON'; }
+  });
+  document.getElementById('json-minify').addEventListener('click', () => {
+    try { output.value = JSON.stringify(JSON.parse(input.value)); }
+    catch (e) { output.value = 'Error: Invalid JSON'; }
+  });
+  document.getElementById('converter-swap').addEventListener('click', () => {
+    const temp = input.value;
+    input.value = output.value;
+    output.value = temp;
+  });
+}
+
+// ============================
+// Charts
+// ============================
+function setupCharts() {
+  document.querySelectorAll('.chart-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.chart-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentChartType = tab.dataset.chart;
+      renderChart(currentChartType);
+    });
+  });
+}
+
+function renderChart(type) {
+  const canvas = document.getElementById('chart-canvas');
+  const legend = document.getElementById('chart-legend');
+  const ctx = canvas.getContext('2d');
+
+  // Set canvas size for high DPI
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = (rect.width - 40) * window.devicePixelRatio;
+  canvas.height = 400 * window.devicePixelRatio;
+  canvas.style.width = (rect.width - 40) + 'px';
+  canvas.style.height = '400px';
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  legend.innerHTML = '';
+
+  if (allSessions.length === 0) {
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-muted').trim();
+    ctx.font = '14px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No data to display. Capture some traffic first.', (rect.width - 40) / 2, 200);
+    return;
+  }
+
+  switch (type) {
+    case 'timing': renderTimingChart(ctx, canvas, legend); break;
+    case 'sizes': renderSizesChart(ctx, canvas, legend); break;
+    case 'status': renderStatusChart(ctx, canvas, legend); break;
+    case 'domains': renderDomainsChart(ctx, canvas, legend); break;
+    case 'types': renderTypesChart(ctx, canvas, legend); break;
+    case 'methods': renderMethodsChart(ctx, canvas, legend); break;
+    case 'timeline': renderTimelineChart(ctx, canvas, legend); break;
+  }
+}
+
+function renderTimingChart(ctx, canvas, legend) {
+  renderBarChart(ctx, canvas, legend, {
+    title: 'Slowest Requests (Response Time)',
+    data: allSessions
+      .filter(s => s.duration > 0)
+      .sort((a, b) => b.duration - a.duration)
+      .slice(0, 20)
+      .map(s => ({ label: truncate(s.path || s.url, 15), value: s.duration, color: getTimingColor(s.duration) })),
+    valueLabel: 'ms'
+  });
+}
+
+function renderSizesChart(ctx, canvas, legend) {
+  renderBarChart(ctx, canvas, legend, {
+    title: 'Largest Responses (Size)',
+    data: allSessions
+      .filter(s => s.responseSize > 0)
+      .sort((a, b) => b.responseSize - a.responseSize)
+      .slice(0, 20)
+      .map(s => ({ label: truncate(s.path || s.url, 15), value: s.responseSize, color: '#89b4fa' })),
+    valueLabel: 'B',
+    formatValue: formatBytes
+  });
+}
+
+function renderStatusChart(ctx, canvas, legend) {
+  const counts = {};
+  allSessions.forEach(s => {
+    const group = s.statusCode ? `${Math.floor(s.statusCode / 100)}xx` : 'Error';
+    counts[group] = (counts[group] || 0) + 1;
+  });
+
+  const colors = { '1xx': '#89dceb', '2xx': '#a6e3a1', '3xx': '#89dceb', '4xx': '#f9e2af', '5xx': '#f38ba8', 'Error': '#6c7086' };
+  renderPieChart(ctx, canvas, legend, {
+    title: 'Status Code Distribution',
+    data: Object.entries(counts).map(([key, value]) => ({ label: key, value, color: colors[key] || '#89b4fa' }))
+  });
+}
+
+function renderDomainsChart(ctx, canvas, legend) {
+  const counts = {};
+  allSessions.forEach(s => {
+    const host = s.host || 'unknown';
+    counts[host] = (counts[host] || 0) + 1;
+  });
+
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  const chartColors = ['#89b4fa', '#a6e3a1', '#f9e2af', '#f38ba8', '#cba6f7', '#89dceb', '#94e2d5', '#fab387', '#74c7ec', '#b4befe'];
+  
+  renderBarChart(ctx, canvas, legend, {
+    title: 'Most Requested Domains',
+    data: sorted.map(([label, value], i) => ({ label: truncate(label, 20), value, color: chartColors[i % chartColors.length] })),
+    valueLabel: 'requests'
+  });
+}
+
+function renderTypesChart(ctx, canvas, legend) {
+  const counts = {};
+  allSessions.forEach(s => {
+    const type = s.contentType || 'other';
+    counts[type] = (counts[type] || 0) + 1;
+  });
+
+  const colors = { json: '#a6e3a1', html: '#f38ba8', javascript: '#f9e2af', css: '#89b4fa', xml: '#cba6f7', image: '#89dceb', font: '#94e2d5', text: '#fab387', other: '#6c7086' };
+  renderPieChart(ctx, canvas, legend, {
+    title: 'Content Type Distribution',
+    data: Object.entries(counts).map(([key, value]) => ({ label: key, value, color: colors[key] || '#89b4fa' }))
+  });
+}
+
+function renderMethodsChart(ctx, canvas, legend) {
+  const counts = {};
+  allSessions.forEach(s => {
+    counts[s.method] = (counts[s.method] || 0) + 1;
+  });
+
+  const colors = { GET: '#a6e3a1', POST: '#89b4fa', PUT: '#f9e2af', DELETE: '#f38ba8', PATCH: '#cba6f7', OPTIONS: '#6c7086', CONNECT: '#94e2d5', HEAD: '#fab387' };
+  renderPieChart(ctx, canvas, legend, {
+    title: 'HTTP Methods Distribution',
+    data: Object.entries(counts).map(([key, value]) => ({ label: key, value, color: colors[key] || '#89b4fa' }))
+  });
+}
+
+function renderTimelineChart(ctx, canvas, legend) {
+  const width = canvas.width / window.devicePixelRatio;
+  const height = canvas.height / window.devicePixelRatio;
+  const padding = { top: 40, right: 20, bottom: 50, left: 60 };
+
+  if (allSessions.length === 0) return;
+
+  const sessions = allSessions.slice(-100); // Last 100
+  const maxDuration = Math.max(...sessions.map(s => s.duration || 0));
+
+  ctx.fillStyle = getCSS('--text-secondary');
+  ctx.font = '13px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Request Timeline (last 100 requests)', width / 2, 20);
+
+  // Y axis
+  ctx.strokeStyle = getCSS('--border');
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 5; i++) {
+    const y = padding.top + (height - padding.top - padding.bottom) * (1 - i / 5);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(width - padding.right, y);
+    ctx.stroke();
+
+    ctx.fillStyle = getCSS('--text-muted');
+    ctx.font = '10px -apple-system';
+    ctx.textAlign = 'right';
+    ctx.fillText(Math.round(maxDuration * i / 5) + 'ms', padding.left - 5, y + 3);
+  }
+
+  // Bars
+  const barWidth = Math.max(2, (width - padding.left - padding.right) / sessions.length - 1);
+  sessions.forEach((s, i) => {
+    const x = padding.left + i * ((width - padding.left - padding.right) / sessions.length);
+    const barHeight = maxDuration > 0 ? ((s.duration || 0) / maxDuration) * (height - padding.top - padding.bottom) : 0;
+    const y = height - padding.bottom - barHeight;
+
+    ctx.fillStyle = s.statusCode >= 400 ? '#f38ba8' : s.statusCode >= 300 ? '#89dceb' : '#a6e3a1';
+    ctx.fillRect(x, y, barWidth, barHeight);
+  });
+}
+
+// Generic bar chart renderer
+function renderBarChart(ctx, canvas, legend, { title, data, valueLabel, formatValue }) {
+  const width = canvas.width / window.devicePixelRatio;
+  const height = canvas.height / window.devicePixelRatio;
+  const padding = { top: 40, right: 20, bottom: 80, left: 60 };
+
+  if (data.length === 0) return;
+
+  const maxValue = Math.max(...data.map(d => d.value));
+
+  // Title
+  ctx.fillStyle = getCSS('--text-secondary');
+  ctx.font = '13px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, width / 2, 20);
+
+  // Grid lines
+  ctx.strokeStyle = getCSS('--border');
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 5; i++) {
+    const y = padding.top + (height - padding.top - padding.bottom) * (1 - i / 5);
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(width - padding.right, y);
+    ctx.stroke();
+
+    const val = maxValue * i / 5;
+    ctx.fillStyle = getCSS('--text-muted');
+    ctx.font = '10px -apple-system';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatValue ? formatValue(val) : Math.round(val) + (valueLabel ? ` ${valueLabel}` : ''), padding.left - 5, y + 3);
+  }
+
+  // Bars
+  const barWidth = Math.max(8, Math.min(40, (width - padding.left - padding.right) / data.length - 4));
+  const totalBarsWidth = data.length * (barWidth + 4);
+  const startX = padding.left + (width - padding.left - padding.right - totalBarsWidth) / 2;
+
+  data.forEach((d, i) => {
+    const x = startX + i * (barWidth + 4);
+    const barHeight = maxValue > 0 ? (d.value / maxValue) * (height - padding.top - padding.bottom) : 0;
+    const y = height - padding.bottom - barHeight;
+
+    // Bar
+    ctx.fillStyle = d.color || '#89b4fa';
+    ctx.beginPath();
+    ctx.roundRect(x, y, barWidth, barHeight, [3, 3, 0, 0]);
+    ctx.fill();
+
+    // Value
+    ctx.fillStyle = getCSS('--text-secondary');
+    ctx.font = '9px -apple-system';
+    ctx.textAlign = 'center';
+    ctx.fillText(formatValue ? formatValue(d.value) : d.value, x + barWidth / 2, y - 4);
+
+    // Label
+    ctx.save();
+    ctx.translate(x + barWidth / 2, height - padding.bottom + 8);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = getCSS('--text-muted');
+    ctx.font = '9px -apple-system';
+    ctx.textAlign = 'left';
+    ctx.fillText(d.label, 0, 0);
+    ctx.restore();
+  });
+}
+
+// Generic pie chart renderer
+function renderPieChart(ctx, canvas, legend, { title, data }) {
+  const width = canvas.width / window.devicePixelRatio;
+  const height = canvas.height / window.devicePixelRatio;
+  const total = data.reduce((sum, d) => sum + d.value, 0);
+  
+  if (total === 0) return;
+
+  // Title
+  ctx.fillStyle = getCSS('--text-secondary');
+  ctx.font = '13px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, width / 2, 20);
+
+  const centerX = width / 2;
+  const centerY = height / 2 + 10;
+  const radius = Math.min(width, height) / 2 - 60;
+
+  let startAngle = -Math.PI / 2;
+
+  data.forEach(d => {
+    const sliceAngle = (d.value / total) * Math.PI * 2;
+    
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.arc(centerX, centerY, radius, startAngle, startAngle + sliceAngle);
+    ctx.closePath();
+    ctx.fillStyle = d.color;
+    ctx.fill();
+
+    // Slice border
+    ctx.strokeStyle = getCSS('--bg-secondary');
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Label
+    if (sliceAngle > 0.15) {
+      const midAngle = startAngle + sliceAngle / 2;
+      const labelX = centerX + Math.cos(midAngle) * (radius * 0.65);
+      const labelY = centerY + Math.sin(midAngle) * (radius * 0.65);
+      
+      ctx.fillStyle = '#1e1e2e';
+      ctx.font = 'bold 11px -apple-system';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${Math.round(d.value / total * 100)}%`, labelX, labelY);
+    }
+
+    startAngle += sliceAngle;
+  });
+
+  // Legend
+  data.forEach(d => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="legend-color" style="background: ${d.color}"></div><span>${d.label}: ${d.value} (${Math.round(d.value / total * 100)}%)</span>`;
+    legend.appendChild(item);
+  });
+}
+
+// ============================
+// Rules
+// ============================
+function setupRules() {
+  const addBtn = document.getElementById('add-rule-btn');
+  const editor = document.getElementById('rule-editor');
+  const saveBtn = document.getElementById('save-rule-btn');
+  const cancelBtn = document.getElementById('cancel-rule-btn');
+
+  addBtn.addEventListener('click', () => {
+    editor.classList.remove('hidden');
+    document.getElementById('rule-name').value = '';
+    document.getElementById('rule-type').value = 'add-request-header';
+    document.getElementById('rule-condition').value = 'all';
+    document.getElementById('rule-condition-value').value = '';
+    updateRuleParams();
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    editor.classList.add('hidden');
+  });
+
+  document.getElementById('rule-type').addEventListener('change', updateRuleParams);
+
+  saveBtn.addEventListener('click', async () => {
+    const rule = {
+      name: document.getElementById('rule-name').value || 'Unnamed Rule',
+      type: document.getElementById('rule-type').value,
+      condition: document.getElementById('rule-condition').value,
+      conditionField: document.getElementById('rule-condition-field').value,
+      conditionValue: document.getElementById('rule-condition-value').value
+    };
+
+    // Get type-specific params
+    const params = document.getElementById('rule-params');
+    params.querySelectorAll('input, select').forEach(input => {
+      rule[input.id.replace('rule-param-', '')] = input.value;
+    });
+
+    await window.api.addRule(rule);
+    editor.classList.add('hidden');
+    loadRules();
+  });
+
+  loadRules();
+}
+
+function updateRuleParams() {
+  const type = document.getElementById('rule-type').value;
+  const params = document.getElementById('rule-params');
+
+  switch (type) {
+    case 'add-request-header':
+    case 'add-response-header':
+      params.innerHTML = `
+        <label>Header Name:</label>
+        <input type="text" id="rule-param-headerName" placeholder="X-Custom-Header">
+        <label>Header Value:</label>
+        <input type="text" id="rule-param-headerValue" placeholder="value">
+      `;
+      break;
+    case 'remove-request-header':
+    case 'remove-response-header':
+      params.innerHTML = `
+        <label>Header Name:</label>
+        <input type="text" id="rule-param-headerName" placeholder="X-Unwanted-Header">
+      `;
+      break;
+    case 'modify-request-body':
+    case 'modify-response-body':
+      params.innerHTML = `
+        <label>Search Text (regex):</label>
+        <input type="text" id="rule-param-searchText" placeholder="search pattern">
+        <label>Replace With:</label>
+        <input type="text" id="rule-param-replaceText" placeholder="replacement">
+      `;
+      break;
+    case 'redirect':
+      params.innerHTML = `
+        <label>Match URL Pattern:</label>
+        <input type="text" id="rule-param-matchUrl" placeholder="https://old-server.com">
+        <label>Redirect To:</label>
+        <input type="text" id="rule-param-redirectUrl" placeholder="https://new-server.com">
+      `;
+      break;
+    case 'set-status-code':
+      params.innerHTML = `
+        <label>Status Code:</label>
+        <input type="number" id="rule-param-statusCode" placeholder="200" min="100" max="599">
+      `;
+      break;
+    case 'delay':
+      params.innerHTML = `
+        <label>Delay (ms):</label>
+        <input type="number" id="rule-param-delayMs" placeholder="1000" min="0">
+      `;
+      break;
+    case 'block':
+      params.innerHTML = '<p style="color: var(--text-muted); font-size: 12px;">Matching requests will be blocked with a 403 response.</p>';
+      break;
+  }
+}
+
+async function loadRules() {
+  const rules = await window.api.getRules();
+  const list = document.getElementById('rules-list');
+
+  if (rules.length === 0) {
+    list.innerHTML = '<div class="rules-empty">No traffic rules defined. Add a rule to modify HTTP traffic on-the-fly.</div>';
+    return;
+  }
+
+  list.innerHTML = rules.map(rule => `
+    <div class="rule-item ${rule.enabled ? '' : 'disabled'}" data-id="${rule.id}">
+      <input type="checkbox" class="rule-toggle" ${rule.enabled ? 'checked' : ''}>
+      <div class="rule-info">
+        <div class="rule-name">${escapeHtml(rule.name)}</div>
+        <div class="rule-desc">${escapeHtml(rule.type)} ${rule.condition !== 'all' ? `when ${rule.conditionField} ${rule.condition} "${rule.conditionValue}"` : '(always)'}</div>
+      </div>
+      <div class="rule-actions">
+        <button class="btn btn-small btn-danger rule-delete" title="Delete">✕</button>
+      </div>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.rule-toggle').forEach(toggle => {
+    toggle.addEventListener('change', async () => {
+      const id = toggle.closest('.rule-item').dataset.id;
+      await window.api.toggleRule(id);
+      loadRules();
+    });
+  });
+
+  list.querySelectorAll('.rule-delete').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.closest('.rule-item').dataset.id;
+      await window.api.deleteRule(id);
+      loadRules();
+    });
+  });
+}
+
+// ============================
+// Settings
+// ============================
+function setupSettings() {
+  document.getElementById('save-settings-btn').addEventListener('click', async () => {
+    const newSettings = {
+      proxyPort: parseInt(document.getElementById('setting-port').value) || 8888,
+      theme: document.getElementById('setting-theme').value,
+      autoScroll: document.getElementById('setting-autoscroll').checked,
+      maxSessions: parseInt(document.getElementById('setting-max-sessions').value) || 10000,
+      highlightErrors: document.getElementById('setting-highlight-errors').checked,
+      highlightSlowRequests: document.getElementById('setting-highlight-slow').checked,
+      slowRequestThreshold: parseInt(document.getElementById('setting-slow-threshold').value) || 3000,
+      largeRequestThreshold: parseInt(document.getElementById('setting-large-threshold').value) || 1048576
+    };
+
+    settings = await window.api.updateSettings(newSettings);
+    applyTheme(settings.theme);
+    applyFilters(); // Re-render with new highlight settings
+    hideModal('modal-settings');
+  });
+}
+
+// ============================
+// Context Menu
+// ============================
+function setupContextMenu() {
+  const menu = document.createElement('div');
+  menu.className = 'context-menu hidden';
+  menu.id = 'context-menu';
+  document.body.appendChild(menu);
+
+  document.addEventListener('click', () => {
+    menu.classList.add('hidden');
+  });
+}
+
+function showContextMenu(e, session) {
+  e.preventDefault();
+  const menu = document.getElementById('context-menu');
+  
+  menu.innerHTML = `
+    <button class="context-menu-item" id="ctx-copy-url">Copy URL</button>
+    <button class="context-menu-item" id="ctx-copy-curl">Copy as cURL</button>
+    <div class="context-menu-separator"></div>
+    <button class="context-menu-item" id="ctx-resubmit">Edit & Resubmit</button>
+    <button class="context-menu-item" id="ctx-replay">Replay Request</button>
+    <div class="context-menu-separator"></div>
+    <button class="context-menu-item" id="ctx-copy-headers">Copy Response Headers</button>
+    <button class="context-menu-item" id="ctx-copy-body">Copy Response Body</button>
+    <div class="context-menu-separator"></div>
+    <button class="context-menu-item" id="ctx-highlight">Add Highlight Rule</button>
+  `;
+
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.remove('hidden');
+
+  // Ensure menu stays in viewport
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    menu.style.left = (e.clientX - rect.width) + 'px';
+  }
+  if (rect.bottom > window.innerHeight) {
+    menu.style.top = (e.clientY - rect.height) + 'px';
+  }
+
+  document.getElementById('ctx-copy-url').addEventListener('click', () => {
+    navigator.clipboard.writeText(session.url);
+  });
+
+  document.getElementById('ctx-copy-curl').addEventListener('click', () => {
+    let curl = `curl -X ${session.method} '${session.url}'`;
+    Object.entries(session.requestHeaders || {}).forEach(([k, v]) => {
+      curl += ` \\\n  -H '${k}: ${v}'`;
+    });
+    if (session.requestBody) {
+      curl += ` \\\n  -d '${session.requestBody}'`;
+    }
+    navigator.clipboard.writeText(curl);
+  });
+
+  document.getElementById('ctx-resubmit').addEventListener('click', () => {
+    openResubmitForSession(session);
+  });
+
+  document.getElementById('ctx-replay').addEventListener('click', async () => {
+    const headers = {};
+    Object.entries(session.requestHeaders || {}).forEach(([k, v]) => {
+      if (!['host', 'content-length', 'connection'].includes(k.toLowerCase())) {
+        headers[k] = v;
+      }
+    });
+    await window.api.sendRequest({
+      method: session.method,
+      url: session.url,
+      headers,
+      body: session.requestBody
+    });
+  });
+
+  document.getElementById('ctx-copy-headers').addEventListener('click', () => {
+    const text = Object.entries(session.responseHeaders || {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+    navigator.clipboard.writeText(text);
+  });
+
+  document.getElementById('ctx-copy-body').addEventListener('click', () => {
+    navigator.clipboard.writeText(session.responseBody || '');
+  });
+
+  document.getElementById('ctx-highlight').addEventListener('click', async () => {
+    await window.api.addHighlightRule({
+      name: `Highlight ${session.host}`,
+      conditionField: 'host',
+      condition: 'equals',
+      conditionValue: session.host,
+      color: '#f38ba8'
+    });
+  });
+}
+
+// ============================
+// Keyboard Shortcuts
+// ============================
+function setupKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    // F5 - Start capture
+    if (e.key === 'F5') {
+      e.preventDefault();
+      startCapture();
+    }
+    // F6 - Stop capture
+    if (e.key === 'F6') {
+      e.preventDefault();
+      stopCapture();
+    }
+    // Escape - Close modals
+    if (e.key === 'Escape') {
+      document.querySelectorAll('.modal-overlay.show').forEach(m => m.classList.remove('show'));
+      document.getElementById('context-menu')?.classList.add('hidden');
+    }
+    // Delete - Clear (with Cmd)
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Backspace') {
+      e.preventDefault();
+      clearAll();
+    }
+  });
+}
+
+// ============================
+// Theme Toggle
+// ============================
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  window.api.updateSettings({ theme: next });
+}
+
+// ============================
+// Stats
+// ============================
+function updateStats() {
+  const total = filteredSessions.length;
+  const totalSize = filteredSessions.reduce((sum, s) => sum + (s.responseSize || 0), 0);
+  const totalTime = filteredSessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+  const errors = filteredSessions.filter(s => s.statusCode >= 400).length;
+
+  document.getElementById('stat-total').textContent = `${total} request${total !== 1 ? 's' : ''}`;
+  document.getElementById('stat-size').textContent = formatBytes(totalSize);
+  document.getElementById('stat-time').textContent = formatDuration(totalTime);
+  document.getElementById('sb-requests').textContent = `Requests: ${allSessions.length}`;
+  document.getElementById('sb-errors').textContent = `Errors: ${errors}`;
+  document.getElementById('sb-size').textContent = `Total: ${formatBytes(totalSize)}`;
+}
+
+// ============================
+// Helpers
+// ============================
+function getStatusClass(code) {
+  if (!code) return 'status-0';
+  if (code >= 500) return 'status-5xx';
+  if (code >= 400) return 'status-4xx';
+  if (code >= 300) return 'status-3xx';
+  if (code >= 200) return 'status-2xx';
+  return '';
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDuration(ms) {
+  if (!ms || ms === 0) return '0 ms';
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + ' s';
+  return (ms / 60000).toFixed(1) + ' min';
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function looksLikeJSON(str) {
+  if (!str) return false;
+  const trimmed = str.trim();
+  return (trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'));
+}
+
+function tryPrettifyJSON(str) {
+  try {
+    return JSON.stringify(JSON.parse(str), null, 2);
+  } catch (e) {
+    return str;
+  }
+}
+
+function truncate(str, len) {
+  if (!str) return '';
+  return str.length > len ? str.slice(0, len) + '...' : str;
+}
+
+function getTimingColor(ms) {
+  if (ms < 200) return '#a6e3a1';
+  if (ms < 500) return '#89dceb';
+  if (ms < 1000) return '#f9e2af';
+  if (ms < 3000) return '#fab387';
+  return '#f38ba8';
+}
+
+function getCSS(variable) {
+  return getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
+}
