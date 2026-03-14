@@ -163,8 +163,8 @@
             </svg>
           </div>
           <div class="empty-title">No HTTP Traffic Captured</div>
-          <div class="empty-subtitle">Click <strong>Capture</strong> to start monitoring HTTP traffic on port <span id="proxy-port">8888</span></div>
-          <div class="empty-hint">Configure your browser or application to use proxy: <code>127.0.0.1:8888</code></div>
+          <div class="empty-subtitle">Click <strong>Capture</strong> to start monitoring ALL local HTTP/HTTPS traffic</div>
+          <div class="empty-hint">System proxy will be configured automatically — no manual setup needed</div>
           <div class="empty-hint">Or use <strong>Compose</strong> to send custom HTTP requests</div>
         </div>
       </div>
@@ -196,7 +196,7 @@
   <!-- Status Bar -->
   <div class="statusbar" id="statusbar">
     <div class="statusbar-left">
-      <span class="statusbar-item" id="sb-proxy">Proxy: 127.0.0.1:8888</span>
+      <span class="statusbar-item" id="sb-proxy">🌐 System-wide Capture</span>
       <span class="statusbar-item" id="sb-status">Ready</span>
     </div>
     <div class="statusbar-right">
@@ -442,7 +442,7 @@
       <div class="modal-body">
         <div class="settings-form">
           <div class="form-group">
-            <label>Proxy Port:</label>
+            <label>Capture Port:</label>
             <input type="number" id="setting-port" value="8888" min="1024" max="65535">
           </div>
           <div class="form-group">
