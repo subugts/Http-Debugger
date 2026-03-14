@@ -214,7 +214,7 @@ function setupIPC() {
   });
 
   ipcMain.handle('get-capture-status', async () => {
-    return { isCapturing, port: settings.proxyPort };
+    return { isCapturing, port: settings.proxyPort, mode: 'system-wide' };
   });
 
   ipcMain.handle('clear-sessions', async () => {
@@ -310,7 +310,7 @@ function setupIPC() {
 }
 
 async function startCapturing() {
-  if (isCapturing) return { success: true, port: settings.proxyPort };
+  if (isCapturing) return { success: true, port: settings.proxyPort, mode: 'system-wide' };
 
   try {
     proxyEngine.onRequest = (session) => {
@@ -337,10 +337,10 @@ async function startCapturing() {
     isCapturing = true;
     
     if (mainWindow) {
-      mainWindow.webContents.send('capture-status', { isCapturing: true, port: settings.proxyPort });
+      mainWindow.webContents.send('capture-status', { isCapturing: true, port: settings.proxyPort, mode: 'system-wide' });
     }
     
-    return { success: true, port: settings.proxyPort };
+    return { success: true, port: settings.proxyPort, mode: 'system-wide' };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -603,6 +603,34 @@ app.whenReady().then(createWindow);
 app.on('window-all-closed', () => {
   if (proxyEngine) proxyEngine.stop();
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Critical: restore system proxy on any exit path
+app.on('before-quit', () => {
+  if (proxyEngine && proxyEngine.isRunning) {
+    proxyEngine.stop();
+  }
+});
+
+process.on('SIGINT', () => {
+  if (proxyEngine && proxyEngine.isRunning) {
+    proxyEngine.stop();
+  }
+  process.exit();
+});
+
+process.on('SIGTERM', () => {
+  if (proxyEngine && proxyEngine.isRunning) {
+    proxyEngine.stop();
+  }
+  process.exit();
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  if (proxyEngine && proxyEngine.isRunning) {
+    proxyEngine.stop();
+  }
 });
 
 app.on('activate', () => {

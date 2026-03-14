@@ -4,11 +4,13 @@ const net = require('net');
 const tls = require('tls');
 const url = require('url');
 const crypto = require('crypto');
+const { execSync } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 
 /**
- * ProxyEngine - HTTP/HTTPS proxy-based traffic sniffer
- * Captures all HTTP(S) traffic passing through the proxy
+ * ProxyEngine - System-wide HTTP/HTTPS traffic sniffer
+ * Automatically configures macOS system proxy to capture ALL local HTTP traffic.
+ * No manual proxy configuration needed — just click Capture.
  */
 class ProxyEngine {
   constructor(port = 8888) {
@@ -18,11 +20,12 @@ class ProxyEngine {
     this.isRunning = false;
     this._ca = null;
     this._certs = new Map();
+    this._originalProxySettings = {};
+    this._networkServices = [];
     this._generateCA();
   }
 
   _generateCA() {
-    // Generate a self-signed CA for SSL interception
     try {
       const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048
@@ -30,45 +33,121 @@ class ProxyEngine {
       this._caKey = privateKey;
       this._caPublicKey = publicKey;
     } catch (e) {
-      // Fallback - we'll handle SSL connections without decryption
       this._caKey = null;
     }
   }
 
-  _createFakeCert(hostname) {
-    if (this._certs.has(hostname)) {
-      return this._certs.get(hostname);
-    }
+  // ==========================================
+  // macOS System Proxy Management
+  // ==========================================
 
+  /**
+   * Detect all active network services (Wi-Fi, Ethernet, etc.)
+   */
+  _detectNetworkServices() {
     try {
-      const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
-        modulusLength: 2048
-      });
-
-      // Self-signed cert for the hostname
-      const cert = {
-        key: privateKey.export({ type: 'pkcs8', format: 'pem' }),
-        cert: this._createSelfSignedCert(privateKey, hostname)
-      };
-
-      this._certs.set(hostname, cert);
-      return cert;
+      const output = execSync('networksetup -listallnetworkservices', { encoding: 'utf-8' });
+      const lines = output.split('\n').filter(l => l.trim() && !l.startsWith('An asterisk'));
+      this._networkServices = lines;
+      console.log(`[ProxyEngine] Detected network services: ${lines.join(', ')}`);
+      return lines;
     } catch (e) {
-      return null;
+      this._networkServices = ['Wi-Fi', 'Ethernet'];
+      return this._networkServices;
     }
   }
 
-  _createSelfSignedCert(privateKey, hostname) {
-    // Use a basic self-signed approach
-    // In production, you'd use a proper CA chain
-    try {
-      const forge = null; // Would use node-forge in production
-      // For now, return null - HTTPS will be handled via CONNECT tunneling
-      return null;
-    } catch (e) {
-      return null;
+  /**
+   * Save current proxy settings so we can restore them later
+   */
+  _saveOriginalProxySettings() {
+    this._originalProxySettings = {};
+    for (const service of this._networkServices) {
+      try {
+        const httpProxy = execSync(`networksetup -getwebproxy "${service}"`, { encoding: 'utf-8' });
+        const httpsProxy = execSync(`networksetup -getsecurewebproxy "${service}"`, { encoding: 'utf-8' });
+        this._originalProxySettings[service] = {
+          http: this._parseProxyOutput(httpProxy),
+          https: this._parseProxyOutput(httpsProxy)
+        };
+      } catch (e) {
+        // Service might not support proxy settings
+      }
     }
   }
+
+  _parseProxyOutput(output) {
+    const result = { enabled: false, server: '', port: 0 };
+    const lines = output.split('\n');
+    for (const line of lines) {
+      const [key, ...valueParts] = line.split(':');
+      const value = valueParts.join(':').trim();
+      if (key.trim().toLowerCase() === 'enabled') {
+        result.enabled = value.toLowerCase() === 'yes';
+      } else if (key.trim().toLowerCase() === 'server') {
+        result.server = value;
+      } else if (key.trim().toLowerCase() === 'port') {
+        result.port = parseInt(value) || 0;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Set system-wide HTTP & HTTPS proxy to our proxy server
+   */
+  _enableSystemProxy() {
+    const errors = [];
+    for (const service of this._networkServices) {
+      try {
+        execSync(`networksetup -setwebproxy "${service}" 127.0.0.1 ${this.port}`, { encoding: 'utf-8' });
+        execSync(`networksetup -setwebproxystate "${service}" on`, { encoding: 'utf-8' });
+        execSync(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 ${this.port}`, { encoding: 'utf-8' });
+        execSync(`networksetup -setsecurewebproxystate "${service}" on`, { encoding: 'utf-8' });
+        console.log(`[ProxyEngine] ✅ System proxy set on: ${service}`);
+      } catch (e) {
+        errors.push(`${service}: ${e.message}`);
+      }
+    }
+    if (errors.length > 0) {
+      console.warn(`[ProxyEngine] ⚠️ Could not set proxy on some services:`, errors);
+    }
+  }
+
+  /**
+   * Restore original system proxy settings
+   */
+  _restoreSystemProxy() {
+    for (const service of this._networkServices) {
+      try {
+        const original = this._originalProxySettings[service];
+        if (original && original.http.enabled) {
+          execSync(`networksetup -setwebproxy "${service}" ${original.http.server} ${original.http.port}`, { encoding: 'utf-8' });
+          execSync(`networksetup -setwebproxystate "${service}" on`, { encoding: 'utf-8' });
+        } else {
+          execSync(`networksetup -setwebproxystate "${service}" off`, { encoding: 'utf-8' });
+        }
+        if (original && original.https.enabled) {
+          execSync(`networksetup -setsecurewebproxy "${service}" ${original.https.server} ${original.https.port}`, { encoding: 'utf-8' });
+          execSync(`networksetup -setsecurewebproxystate "${service}" on`, { encoding: 'utf-8' });
+        } else {
+          execSync(`networksetup -setsecurewebproxystate "${service}" off`, { encoding: 'utf-8' });
+        }
+        console.log(`[ProxyEngine] ✅ System proxy restored on: ${service}`);
+      } catch (e) {
+        try {
+          execSync(`networksetup -setwebproxystate "${service}" off`, { encoding: 'utf-8' });
+          execSync(`networksetup -setsecurewebproxystate "${service}" off`, { encoding: 'utf-8' });
+        } catch (e2) {
+          console.error(`[ProxyEngine] ❌ Failed to restore proxy on ${service}:`, e2.message);
+        }
+      }
+    }
+  }
+
+  // ==========================================
+  // Proxy Server Start / Stop
+  // ==========================================
 
   async start() {
     return new Promise((resolve, reject) => {
@@ -77,26 +156,40 @@ class ProxyEngine {
         return;
       }
 
+      // 1. Detect network services
+      this._detectNetworkServices();
+      // 2. Save current proxy settings
+      this._saveOriginalProxySettings();
+
+      // 3. Create proxy server
       this.server = http.createServer((req, res) => {
         this._handleHttpRequest(req, res);
       });
 
-      // Handle CONNECT method for HTTPS
       this.server.on('connect', (req, clientSocket, head) => {
         this._handleConnect(req, clientSocket, head);
       });
 
       this.server.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {
-          reject(new Error(`Port ${this.port} is already in use. Please choose a different port.`));
+          reject(new Error(`Port ${this.port} is already in use. Change the port in Settings.`));
         } else {
           reject(err);
         }
       });
 
-      this.server.listen(this.port, '127.0.0.1', () => {
+      // 4. Listen on 0.0.0.0 (all interfaces)
+      this.server.listen(this.port, '0.0.0.0', () => {
         this.isRunning = true;
-        console.log(`HTTP Debugger proxy listening on port ${this.port}`);
+
+        // 5. Set system proxy to route ALL traffic through us
+        try {
+          this._enableSystemProxy();
+          console.log(`[ProxyEngine] 🚀 Listening on 0.0.0.0:${this.port} — System proxy ACTIVE — capturing ALL local HTTP traffic`);
+        } catch (e) {
+          console.warn(`[ProxyEngine] ⚠️ Could not auto-set system proxy: ${e.message}. Set it manually.`);
+        }
+
         resolve();
       });
     });
@@ -104,6 +197,14 @@ class ProxyEngine {
 
   async stop() {
     return new Promise((resolve) => {
+      // 1. Restore system proxy FIRST (so network continues working)
+      try {
+        this._restoreSystemProxy();
+        console.log('[ProxyEngine] System proxy restored.');
+      } catch (e) {
+        console.error('[ProxyEngine] Error restoring system proxy:', e.message);
+      }
+
       if (!this.isRunning || !this.server) {
         this.isRunning = false;
         resolve();
@@ -112,7 +213,7 @@ class ProxyEngine {
 
       this.server.close(() => {
         this.isRunning = false;
-        console.log('HTTP Debugger proxy stopped');
+        console.log('[ProxyEngine] Proxy server stopped.');
         resolve();
       });
 
@@ -124,37 +225,64 @@ class ProxyEngine {
     });
   }
 
+  // ==========================================
+  // HTTP Request Handling
+  // ==========================================
+
   _handleHttpRequest(clientReq, clientRes) {
     const startTime = Date.now();
     const sessionId = uuidv4();
 
-    const parsedUrl = url.parse(clientReq.url);
-    const targetHost = parsedUrl.hostname || clientReq.headers.host?.split(':')[0];
-    const targetPort = parsedUrl.port || 80;
-    const targetPath = parsedUrl.path;
+    let targetUrl = clientReq.url;
+    let parsedUrl;
 
-    if (!targetHost) {
+    try {
+      if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+        parsedUrl = new URL(targetUrl);
+      } else {
+        const host = clientReq.headers.host || 'localhost';
+        parsedUrl = new URL(`http://${host}${targetUrl}`);
+      }
+    } catch (e) {
       clientRes.writeHead(400, { 'Content-Type': 'text/plain' });
-      clientRes.end('Bad Request');
+      clientRes.end('Bad Request: Invalid URL');
       return;
     }
 
-    // Collect request body
+    const targetHost = parsedUrl.hostname;
+    const targetPort = parsedUrl.port || 80;
+    const targetPath = parsedUrl.pathname + parsedUrl.search;
+
+    if (!targetHost) {
+      clientRes.writeHead(400, { 'Content-Type': 'text/plain' });
+      clientRes.end('Bad Request: No host');
+      return;
+    }
+
+    // Skip requests to our own proxy to avoid infinite loops
+    if ((targetHost === '127.0.0.1' || targetHost === 'localhost') && parseInt(targetPort) === this.port) {
+      clientRes.writeHead(200, { 'Content-Type': 'text/plain' });
+      clientRes.end('HTTP Debugger Proxy Active');
+      return;
+    }
+
     const requestBodyChunks = [];
     clientReq.on('data', (chunk) => requestBodyChunks.push(chunk));
     clientReq.on('end', () => {
       const requestBody = Buffer.concat(requestBodyChunks);
+
+      const proxyHeaders = { ...clientReq.headers };
+      delete proxyHeaders['proxy-connection'];
+      delete proxyHeaders['proxy-authorization'];
+      proxyHeaders.host = parsedUrl.host;
 
       const proxyOptions = {
         hostname: targetHost,
         port: targetPort,
         path: targetPath,
         method: clientReq.method,
-        headers: { ...clientReq.headers }
+        headers: proxyHeaders
       };
-
-      // Remove proxy-specific headers
-      delete proxyOptions.headers['proxy-connection'];
 
       const proxyReq = http.request(proxyOptions, (proxyRes) => {
         const responseChunks = [];
@@ -163,15 +291,15 @@ class ProxyEngine {
           const responseBody = Buffer.concat(responseChunks);
           const duration = Date.now() - startTime;
 
-          // Forward response to client
-          clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
-          clientRes.end(responseBody);
+          try {
+            clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+            clientRes.end(responseBody);
+          } catch (e) { /* client disconnected */ }
 
-          // Create session object
           const session = this._createSession({
             id: sessionId,
             method: clientReq.method,
-            url: clientReq.url,
+            url: targetUrl,
             protocol: 'HTTP',
             host: targetHost,
             path: targetPath,
@@ -193,13 +321,15 @@ class ProxyEngine {
       });
 
       proxyReq.on('error', (err) => {
-        clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-        clientRes.end(`Proxy Error: ${err.message}`);
+        try {
+          clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
+          clientRes.end(`Proxy Error: ${err.message}`);
+        } catch (e) { /* client gone */ }
 
         const session = this._createSession({
           id: sessionId,
           method: clientReq.method,
-          url: clientReq.url,
+          url: targetUrl,
           protocol: 'HTTP',
           host: targetHost,
           path: targetPath,
@@ -220,6 +350,10 @@ class ProxyEngine {
         }
       });
 
+      proxyReq.setTimeout(60000, () => {
+        proxyReq.destroy();
+      });
+
       if (requestBody.length > 0) {
         proxyReq.write(requestBody);
       }
@@ -227,13 +361,16 @@ class ProxyEngine {
     });
   }
 
+  // ==========================================
+  // HTTPS CONNECT Tunnel Handling
+  // ==========================================
+
   _handleConnect(req, clientSocket, head) {
     const startTime = Date.now();
     const [hostname, port] = req.url.split(':');
     const targetPort = parseInt(port) || 443;
     const sessionId = uuidv4();
 
-    // Create tunnel to target server
     const serverSocket = net.connect(targetPort, hostname, () => {
       clientSocket.write(
         'HTTP/1.1 200 Connection Established\r\n' +
@@ -241,14 +378,13 @@ class ProxyEngine {
         '\r\n'
       );
 
-      // Track data for the session
       let requestSize = 0;
       let responseSize = 0;
+      let sessionCreated = false;
 
       serverSocket.pipe(clientSocket);
       clientSocket.pipe(serverSocket);
 
-      // Track sizes
       clientSocket.on('data', (chunk) => {
         requestSize += chunk.length;
       });
@@ -258,11 +394,13 @@ class ProxyEngine {
       });
 
       const createTunnelSession = () => {
+        if (sessionCreated) return;
+        sessionCreated = true;
         const duration = Date.now() - startTime;
         const session = this._createSession({
           id: sessionId,
           method: 'CONNECT',
-          url: `https://${req.url}`,
+          url: `https://${hostname}${targetPort !== 443 ? ':' + targetPort : ''}`,
           protocol: 'HTTPS',
           host: hostname,
           path: '/',
@@ -271,7 +409,7 @@ class ProxyEngine {
           requestHeaders: req.headers || {},
           responseHeaders: {},
           requestBody: null,
-          responseBody: `[HTTPS Tunnel - ${requestSize} bytes sent, ${responseSize} bytes received]`,
+          responseBody: `[HTTPS Tunnel — ${requestSize} bytes ↑ / ${responseSize} bytes ↓]`,
           requestSize: requestSize,
           responseSize: responseSize,
           duration: duration,
@@ -284,20 +422,21 @@ class ProxyEngine {
       };
 
       serverSocket.on('end', createTunnelSession);
+      serverSocket.on('close', createTunnelSession);
       clientSocket.on('end', createTunnelSession);
+      clientSocket.on('close', createTunnelSession);
     });
 
     serverSocket.on('error', (err) => {
-      clientSocket.write(
-        'HTTP/1.1 502 Bad Gateway\r\n' +
-        '\r\n'
-      );
-      clientSocket.end();
+      try {
+        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+        clientSocket.end();
+      } catch (e) { /* ignore */ }
 
       const session = this._createSession({
         id: sessionId,
         method: 'CONNECT',
-        url: `https://${req.url}`,
+        url: `https://${hostname}${targetPort !== 443 ? ':' + targetPort : ''}`,
         protocol: 'HTTPS',
         host: hostname,
         path: '/',
@@ -319,6 +458,10 @@ class ProxyEngine {
     });
 
     clientSocket.on('error', () => {
+      serverSocket.destroy();
+    });
+
+    serverSocket.setTimeout(120000, () => {
       serverSocket.destroy();
     });
   }
