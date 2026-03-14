@@ -172,17 +172,17 @@ function handleCaptureStatus(status) {
     captureBtn.disabled = true;
     captureBtn.classList.remove('primary');
     stopBtn.disabled = false;
-    statusEl.innerHTML = '<span class="status-dot running"></span><span class="status-text">Capturing on :' + (status.port || settings.proxyPort) + '</span>';
+    statusEl.innerHTML = '<span class="status-dot running"></span><span class="status-text">🌐 Capturing ALL local traffic</span>';
     sbStatus.textContent = 'Capturing...';
+    sbProxy.textContent = '🌐 System-wide Capture Active';
   } else {
     captureBtn.disabled = false;
     captureBtn.classList.add('primary');
     stopBtn.disabled = true;
     statusEl.innerHTML = '<span class="status-dot stopped"></span><span class="status-text">Stopped</span>';
     sbStatus.textContent = 'Ready';
+    sbProxy.textContent = '🌐 System-wide Capture';
   }
-  sbProxy.textContent = `Proxy: 127.0.0.1:${status.port || settings.proxyPort}`;
-  document.getElementById('proxy-port').textContent = status.port || settings.proxyPort;
 }
 
 // ============================
