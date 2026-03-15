@@ -2167,6 +2167,67 @@ body {
 }
 
 /* ============================
+   Pending / Streaming Row
+   ============================ */
+.request-row.pending-row {
+  opacity: 0.7;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 8px,
+    rgba(137, 180, 250, 0.04) 8px,
+    rgba(137, 180, 250, 0.04) 16px
+  );
+}
+
+.request-row.pending-row .td-status {
+  color: var(--warning);
+}
+
+.request-row.pending-row .td-time {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.pending-spinner {
+  display: inline-block;
+  animation: pendingSpin 1.2s linear infinite;
+  font-size: 11px;
+}
+
+@keyframes pendingSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.pending-elapsed {
+  letter-spacing: 2px;
+  animation: pendingDots 1.5s steps(3, end) infinite;
+}
+
+@keyframes pendingDots {
+  0% { opacity: 0.3; }
+  50% { opacity: 1; }
+  100% { opacity: 0.3; }
+}
+
+/* Completed row flash (transition from pending) */
+.request-row.completed-row {
+  animation: completedFlash 0.6s ease-out;
+}
+
+@keyframes completedFlash {
+  0% {
+    background-color: rgba(166, 227, 161, 0.2);
+    opacity: 0.8;
+  }
+  100% {
+    background-color: transparent;
+    opacity: 1;
+  }
+}
+
+/* ============================
    Live Status Indicator
    ============================ */
 .live-status {

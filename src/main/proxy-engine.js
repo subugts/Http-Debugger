@@ -17,6 +17,7 @@ class ProxyEngine {
     this.port = port;
     this.server = null;
     this.onRequest = null;
+    this.onSessionUpdate = null;
     this.isRunning = false;
     this._ca = null;
     this._certs = new Map();
@@ -266,6 +267,30 @@ class ProxyEngine {
       return;
     }
 
+    // === Streaming: emit pending session immediately ===
+    const pendingSession = this._createSession({
+      id: sessionId,
+      method: clientReq.method,
+      url: targetUrl,
+      protocol: 'HTTP',
+      host: targetHost,
+      path: targetPath,
+      statusCode: 0,
+      statusMessage: 'Pending...',
+      requestHeaders: clientReq.headers,
+      responseHeaders: {},
+      requestBody: null,
+      responseBody: null,
+      requestSize: 0,
+      responseSize: 0,
+      duration: 0,
+      requestTimestamp: startTime,
+      isPending: true
+    });
+    if (this.onRequest) {
+      this.onRequest(pendingSession);
+    }
+
     const requestBodyChunks = [];
     clientReq.on('data', (chunk) => requestBodyChunks.push(chunk));
     clientReq.on('end', () => {
@@ -314,11 +339,12 @@ class ProxyEngine {
             duration: duration,
             requestTimestamp: startTime,
             remoteAddress: proxyRes.socket?.remoteAddress,
-            remotePort: proxyRes.socket?.remotePort
+            remotePort: proxyRes.socket?.remotePort,
+            isPending: false
           });
 
-          if (this.onRequest) {
-            this.onRequest(session);
+          if (this.onSessionUpdate) {
+            this.onSessionUpdate(session);
           }
         });
       });
@@ -346,11 +372,12 @@ class ProxyEngine {
           responseSize: 0,
           duration: Date.now() - startTime,
           error: err.message,
-          requestTimestamp: startTime
+          requestTimestamp: startTime,
+          isPending: false
         });
 
-        if (this.onRequest) {
-          this.onRequest(session);
+        if (this.onSessionUpdate) {
+          this.onSessionUpdate(session);
         }
       });
 
@@ -374,6 +401,31 @@ class ProxyEngine {
     const [hostname, port] = req.url.split(':');
     const targetPort = parseInt(port) || 443;
     const sessionId = uuidv4();
+
+    // === Streaming: emit pending CONNECT session immediately ===
+    const pendingTunnel = this._createSession({
+      id: sessionId,
+      method: 'CONNECT',
+      url: `https://${hostname}${targetPort !== 443 ? ':' + targetPort : ''}`,
+      protocol: 'HTTPS',
+      host: hostname,
+      path: '/',
+      statusCode: 0,
+      statusMessage: 'Connecting...',
+      requestHeaders: req.headers || {},
+      responseHeaders: {},
+      requestBody: null,
+      responseBody: null,
+      requestSize: 0,
+      responseSize: 0,
+      duration: 0,
+      isTunnel: true,
+      isPending: true,
+      requestTimestamp: startTime
+    });
+    if (this.onRequest) {
+      this.onRequest(pendingTunnel);
+    }
 
     const serverSocket = net.connect(targetPort, hostname, () => {
       clientSocket.write(
@@ -418,11 +470,12 @@ class ProxyEngine {
           responseSize: responseSize,
           duration: duration,
           isTunnel: true,
-          requestTimestamp: startTime
+          requestTimestamp: startTime,
+          isPending: false
         });
 
-        if (this.onRequest) {
-          this.onRequest(session);
+        if (this.onSessionUpdate) {
+          this.onSessionUpdate(session);
         }
       };
 
@@ -455,11 +508,12 @@ class ProxyEngine {
         responseSize: 0,
         duration: Date.now() - startTime,
         error: err.message,
-        requestTimestamp: startTime
+        requestTimestamp: startTime,
+        isPending: false
       });
 
-      if (this.onRequest) {
-        this.onRequest(session);
+      if (this.onSessionUpdate) {
+        this.onSessionUpdate(session);
       }
     });
 
@@ -498,7 +552,8 @@ class ProxyEngine {
       requestTimestamp: data.requestTimestamp || (now - (data.duration || 0)),
       responseTimestamp: now,
       remoteAddress: data.remoteAddress || null,
-      remotePort: data.remotePort || null
+      remotePort: data.remotePort || null,
+      isPending: data.isPending || false
     };
   }
 

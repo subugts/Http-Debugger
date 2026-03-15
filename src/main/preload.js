@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld('api', {
   onNewSession: (callback) => {
     ipcRenderer.on('new-session', (event, session) => callback(session));
   },
+  onSessionUpdated: (callback) => {
+    ipcRenderer.on('session-updated', (event, session) => callback(session));
+  },
   onCaptureStatus: (callback) => {
     ipcRenderer.on('capture-status', (event, status) => callback(status));
   },

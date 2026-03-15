@@ -73,6 +73,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // IPC listeners
   window.api.onNewSession(handleNewSession);
+  window.api.onSessionUpdated(handleSessionUpdated);
   window.api.onCaptureStatus(handleCaptureStatus);
   window.api.onSessionsCleared(handleSessionsCleared);
   window.api.onSessionsLoaded(handleSessionsLoaded);
@@ -329,6 +330,67 @@ function handleNewSession(session) {
   if (!batchRAF) {
     batchRAF = requestAnimationFrame(flushPendingSessions);
   }
+}
+
+// Streaming: update an existing pending session with completed data
+function handleSessionUpdated(updatedSession) {
+  // Find and replace in allSessions
+  const idx = allSessions.findIndex(s => s.id === updatedSession.id);
+  if (idx !== -1) {
+    allSessions[idx] = { ...allSessions[idx], ...updatedSession };
+  }
+
+  // Find and replace in filteredSessions
+  const fIdx = filteredSessions.findIndex(s => s.id === updatedSession.id);
+  if (fIdx !== -1) {
+    filteredSessions[fIdx] = allSessions[idx] || updatedSession;
+  }
+
+  // If this session is currently selected, refresh detail panel
+  if (selectedSession && selectedSession.id === updatedSession.id) {
+    selectedSession = allSessions[idx] || updatedSession;
+    renderDetail();
+  }
+
+  // Update the row in the virtual scroll if visible
+  filterCacheDirty = true;
+  updateVisibleRow(updatedSession.id);
+  updateStats();
+}
+
+// Update a single visible row without full re-render
+function updateVisibleRow(sessionId) {
+  const row = document.querySelector(`.request-row[data-id="${sessionId}"]`);
+  if (!row) return;
+
+  const session = allSessions.find(s => s.id === sessionId);
+  if (!session) return;
+
+  const statusClass = getStatusClass(session.statusCode);
+  const methodClass = `method-${session.method}`;
+
+  // Remove pending class if no longer pending
+  if (!session.isPending) {
+    row.classList.remove('pending-row');
+    row.classList.add('completed-row');
+  }
+
+  // Update highlight classes
+  row.classList.toggle('error-row', settings.highlightErrors && session.statusCode >= 400);
+  row.classList.toggle('slow-row', settings.highlightSlowRequests && session.duration > settings.slowRequestThreshold);
+  row.classList.toggle('large-row', session.responseSize > settings.largeRequestThreshold);
+
+  row.innerHTML = `
+    <div class="td td-number">${session.number || ''}</div>
+    <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
+    <div class="td td-method ${methodClass}">${session.method}</div>
+    <div class="td td-protocol">${session.protocol || 'HTTP'}</div>
+    <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
+    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
+    <div class="td td-type">${session.contentType || ''}</div>
+    <div class="td td-size">${formatBytes(session.responseSize)}</div>
+    <div class="td td-time">${session.isPending ? '<span class="pending-elapsed">...</span>' : formatDuration(session.duration)}</div>
+  `;
 }
 
 function flushPendingSessions() {
@@ -674,6 +736,11 @@ function createRequestRow(session) {
     row.classList.add('new-row');
   }
 
+  // Pending row (streaming — request received, waiting for response)
+  if (session.isPending) {
+    row.classList.add('pending-row');
+  }
+
   // Highlight classes
   if (settings.highlightErrors && session.statusCode >= 400) {
     row.classList.add('error-row');
@@ -694,14 +761,14 @@ function createRequestRow(session) {
 
   row.innerHTML = `
     <div class="td td-number">${session.number || ''}</div>
-    <div class="td td-status ${statusClass}">${session.statusCode || '—'}</div>
+    <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
     <div class="td td-method ${methodClass}">${session.method}</div>
     <div class="td td-protocol">${session.protocol || 'HTTP'}</div>
     <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
     <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
     <div class="td td-type">${session.contentType || ''}</div>
     <div class="td td-size">${formatBytes(session.responseSize)}</div>
-    <div class="td td-time">${formatDuration(session.duration)}</div>
+    <div class="td td-time">${session.isPending ? '<span class="pending-elapsed">...</span>' : formatDuration(session.duration)}</div>
   `;
 
   row.addEventListener('click', () => selectSession(session, row));
@@ -778,13 +845,20 @@ function renderDetail() {
 function renderSummary(session) {
   let html = '';
 
+  // Pending session banner
+  if (session.isPending) {
+    html += '<div class="summary-pending-banner">⏳ Request sent — waiting for response...</div>';
+  }
+
   // === General Info Section ===
   html += '<div class="summary-section">';
   html += '<div class="summary-section-title">📋 General</div>';
   html += '<div class="summary-grid">';
   html += summaryRow('URL', `<span class="summary-url">${escapeHtml(session.url)}</span>`);
   html += summaryRow('Method', `<span class="method-${session.method}">${session.method}</span>`);
-  html += summaryRow('Status', `<span class="${getStatusClass(session.statusCode)} summary-value status">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
+  html += summaryRow('Status', session.isPending 
+    ? '<span class="pending-badge">⏳ Pending</span>' 
+    : `<span class="${getStatusClass(session.statusCode)} summary-value status">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
   html += summaryRow('Protocol', session.protocol || 'HTTP');
   html += summaryRow('Host', session.host);
   html += summaryRow('Path', session.path);

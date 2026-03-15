@@ -333,6 +333,29 @@ async function startCapturing() {
       }
     };
 
+    // Streaming: update pending sessions when response arrives
+    proxyEngine.onSessionUpdate = (updatedSession) => {
+      const modifiedSession = trafficModifier.applyRules(updatedSession);
+      
+      // Find and replace pending session in array
+      const idx = sessions.findIndex(s => s.id === modifiedSession.id);
+      if (idx !== -1) {
+        modifiedSession.number = sessions[idx].number;
+        modifiedSession.timestamp = sessions[idx].timestamp;
+        sessions[idx] = modifiedSession;
+      } else {
+        // Fallback: add as new
+        requestCounter++;
+        modifiedSession.number = requestCounter;
+        modifiedSession.timestamp = new Date().toISOString();
+        sessions.push(modifiedSession);
+      }
+      
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('session-updated', modifiedSession);
+      }
+    };
+
     await proxyEngine.start();
     isCapturing = true;
     
