@@ -93,6 +93,7 @@
       <div class="search-container">
         <svg viewBox="0 0 24 24" width="14" height="14" class="search-icon"><circle cx="11" cy="11" r="8" stroke="currentColor" fill="none" stroke-width="2"/><path d="M21 21l-4.35-4.35" stroke="currentColor" fill="none" stroke-width="2"/></svg>
         <input type="text" class="search-input" id="search-input" placeholder="Filter requests...">
+        <button class="search-regex-btn" id="search-regex-toggle" title="Toggle Regex Search">.*</button>
         <button class="search-clear" id="search-clear" title="Clear filter">✕</button>
       </div>
     </div>
@@ -119,6 +120,7 @@
       <button class="filter-chip" data-filter="font">Fonts</button>
       <button class="filter-chip" data-filter="other">Other</button>
     </div>
+    <div class="filter-divider"></div>
     <div class="filter-methods">
       <button class="method-chip active" data-method="all">All Methods</button>
       <button class="method-chip" data-method="GET">GET</button>
@@ -129,12 +131,48 @@
       <button class="method-chip" data-method="OPTIONS">OPTIONS</button>
       <button class="method-chip" data-method="CONNECT">CONNECT</button>
     </div>
+    <div class="filter-divider"></div>
+    <div class="status-chips">
+      <button class="status-chip active" data-status="all">Any Status</button>
+      <button class="status-chip status-2xx" data-status="2xx">2xx</button>
+      <button class="status-chip status-3xx" data-status="3xx">3xx</button>
+      <button class="status-chip status-4xx" data-status="4xx">4xx</button>
+      <button class="status-chip status-5xx" data-status="5xx">5xx</button>
+      <button class="status-chip status-err" data-status="err">Errors</button>
+    </div>
+    <div class="filter-divider"></div>
+    <button class="filter-btn" id="btn-advanced-filter" title="Advanced Filters">
+      <svg viewBox="0 0 24 24" width="14" height="14"><path d="M3 4h18l-7 8v5l-4 2V12L3 4z" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+      <span>Filters</span>
+      <span class="filter-badge hidden" id="active-filter-count">0</span>
+    </button>
+    <button class="filter-btn danger hidden" id="btn-clear-filters" title="Clear All Filters">✕ Clear</button>
     <div class="filter-stats" id="filter-stats">
       <span id="stat-total">0 requests</span>
       <span class="stat-separator">|</span>
       <span id="stat-size">0 B</span>
       <span class="stat-separator">|</span>
       <span id="stat-time">0 ms</span>
+    </div>
+  </div>
+
+  <!-- Advanced Filter Panel (collapsible) -->
+  <div class="advanced-filter-panel hidden" id="advanced-filter-panel">
+    <div class="adv-filter-group">
+      <label class="adv-filter-label">Domain:</label>
+      <input type="text" id="filter-domain" class="adv-filter-input" placeholder="e.g. api.example.com">
+    </div>
+    <div class="adv-filter-group">
+      <label class="adv-filter-label">Duration (ms):</label>
+      <input type="number" id="filter-duration-min" class="adv-filter-input small" placeholder="Min">
+      <span class="adv-filter-sep">—</span>
+      <input type="number" id="filter-duration-max" class="adv-filter-input small" placeholder="Max">
+    </div>
+    <div class="adv-filter-group">
+      <label class="adv-filter-label">Size:</label>
+      <input type="text" id="filter-size-min" class="adv-filter-input small" placeholder="Min (e.g. 10KB)">
+      <span class="adv-filter-sep">—</span>
+      <input type="text" id="filter-size-max" class="adv-filter-input small" placeholder="Max (e.g. 5MB)">
     </div>
   </div>
 

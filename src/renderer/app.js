@@ -12,12 +12,41 @@ let selectedSession = null;
 let currentFilter = 'all';
 let currentMethodFilter = 'all';
 let currentSearch = '';
+let currentStatusFilter = 'all'; // 'all', '2xx', '3xx', '4xx', '5xx'
+let currentDomainFilter = '';
+let filterMinDuration = 0;
+let filterMaxDuration = Infinity;
+let filterMinSize = 0;
+let filterMaxSize = Infinity;
+let searchIsRegex = false;
 let sortColumn = 'number';
 let sortDirection = 'asc';
 let settings = {};
 let isCapturing = false;
 let currentDetailTab = 'summary';
 let currentChartType = 'timing';
+
+// Performance: Virtual scrolling state
+const VIRTUAL_ROW_HEIGHT = 28;
+const VIRTUAL_OVERSCAN = 15;
+let virtualScrollTop = 0;
+let virtualVisibleCount = 0;
+let virtualContainer = null;
+let virtualSpacer = null;
+
+// Performance: Batch rendering
+let pendingSessions = [];
+let batchRAF = null;
+const BATCH_INTERVAL = 80; // ms - batch incoming sessions
+let lastBatchFlush = 0;
+
+// Performance: Search debounce
+let searchDebounceTimer = null;
+const SEARCH_DEBOUNCE_MS = 150;
+
+// Performance: Filter cache
+let filterCacheDirty = true;
+let lastFilterKey = '';
 
 // ============================
 // Initialization
@@ -110,20 +139,115 @@ function setupToolbar() {
     exportMenu.classList.remove('show');
   });
 
-  // Search
+  // Search with debounce
   const searchInput = document.getElementById('search-input');
   const searchClear = document.getElementById('search-clear');
   searchInput.addEventListener('input', () => {
-    currentSearch = searchInput.value.trim();
-    searchClear.classList.toggle('visible', currentSearch.length > 0);
-    applyFilters();
+    const val = searchInput.value.trim();
+    searchClear.classList.toggle('visible', val.length > 0);
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+      currentSearch = val;
+      filterCacheDirty = true;
+      applyFilters();
+    }, SEARCH_DEBOUNCE_MS);
   });
   searchClear.addEventListener('click', () => {
     searchInput.value = '';
     currentSearch = '';
     searchClear.classList.remove('visible');
+    filterCacheDirty = true;
     applyFilters();
   });
+
+  // Regex toggle
+  const regexToggle = document.getElementById('search-regex-toggle');
+  if (regexToggle) {
+    regexToggle.addEventListener('click', () => {
+      searchIsRegex = !searchIsRegex;
+      regexToggle.classList.toggle('active', searchIsRegex);
+      if (currentSearch) {
+        filterCacheDirty = true;
+        applyFilters();
+      }
+    });
+  }
+
+  // Advanced filter: status code range
+  document.querySelectorAll('.status-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.status-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      currentStatusFilter = chip.dataset.status;
+      filterCacheDirty = true;
+      applyFilters();
+    });
+  });
+
+  // Advanced filter: duration range
+  const durationMin = document.getElementById('filter-duration-min');
+  const durationMax = document.getElementById('filter-duration-max');
+  if (durationMin) {
+    durationMin.addEventListener('change', () => {
+      filterMinDuration = parseInt(durationMin.value) || 0;
+      filterCacheDirty = true;
+      applyFilters();
+    });
+  }
+  if (durationMax) {
+    durationMax.addEventListener('change', () => {
+      filterMaxDuration = parseInt(durationMax.value) || Infinity;
+      filterCacheDirty = true;
+      applyFilters();
+    });
+  }
+
+  // Advanced filter: size range
+  const sizeMin = document.getElementById('filter-size-min');
+  const sizeMax = document.getElementById('filter-size-max');
+  if (sizeMin) {
+    sizeMin.addEventListener('change', () => {
+      filterMinSize = parseSizeInput(sizeMin.value);
+      filterCacheDirty = true;
+      applyFilters();
+    });
+  }
+  if (sizeMax) {
+    sizeMax.addEventListener('change', () => {
+      filterMaxSize = parseSizeInput(sizeMax.value) || Infinity;
+      filterCacheDirty = true;
+      applyFilters();
+    });
+  }
+
+  // Advanced filter: domain quick-filter
+  const domainFilter = document.getElementById('filter-domain');
+  if (domainFilter) {
+    domainFilter.addEventListener('input', () => {
+      clearTimeout(domainFilter._debounce);
+      domainFilter._debounce = setTimeout(() => {
+        currentDomainFilter = domainFilter.value.trim().toLowerCase();
+        filterCacheDirty = true;
+        applyFilters();
+      }, SEARCH_DEBOUNCE_MS);
+    });
+  }
+
+  // Advanced filter panel toggle
+  const advToggle = document.getElementById('btn-advanced-filter');
+  if (advToggle) {
+    advToggle.addEventListener('click', () => {
+      const panel = document.getElementById('advanced-filter-panel');
+      panel.classList.toggle('hidden');
+      advToggle.classList.toggle('active');
+    });
+  }
+
+  // Clear all filters button
+  const clearFiltersBtn = document.getElementById('btn-clear-filters');
+  if (clearFiltersBtn) {
+    clearFiltersBtn.addEventListener('click', clearAllFilters);
+  }
 
   // Column sorting
   document.querySelectorAll('.th').forEach(th => {
@@ -137,6 +261,7 @@ function setupToolbar() {
       }
       document.querySelectorAll('.th').forEach(t => t.classList.remove('sorted-asc', 'sorted-desc'));
       th.classList.add(sortDirection === 'asc' ? 'sorted-asc' : 'sorted-desc');
+      filterCacheDirty = true;
       applyFilters();
     });
   });
@@ -186,23 +311,50 @@ function handleCaptureStatus(status) {
 }
 
 // ============================
-// Session Handling
+// Session Handling (Batched for Performance)
 // ============================
 function handleNewSession(session) {
   allSessions.push(session);
+  pendingSessions.push(session);
+
+  // Batch rendering with requestAnimationFrame
+  if (!batchRAF) {
+    batchRAF = requestAnimationFrame(flushPendingSessions);
+  }
+}
+
+function flushPendingSessions() {
+  batchRAF = null;
+  if (pendingSessions.length === 0) return;
+
+  const now = performance.now();
+  // Throttle: at most one full re-filter per BATCH_INTERVAL ms
+  if (now - lastBatchFlush < BATCH_INTERVAL && pendingSessions.length < 50) {
+    batchRAF = requestAnimationFrame(flushPendingSessions);
+    return;
+  }
+  lastBatchFlush = now;
+
+  // Check if pending sessions match current filters (fast path: append only)
+  const matchingNew = pendingSessions.filter(s => sessionMatchesFilters(s));
+  pendingSessions = [];
+  filterCacheDirty = true;
   applyFilters();
   updateStats();
 
-  if (settings.autoScroll) {
-    const list = document.getElementById('request-list');
-    list.scrollTop = list.scrollHeight;
+  if (settings.autoScroll && virtualContainer) {
+    virtualContainer.scrollTop = virtualContainer.scrollHeight;
   }
 }
 
 function handleSessionsCleared() {
   allSessions = [];
   filteredSessions = [];
+  pendingSessions = [];
   selectedSession = null;
+  filterCacheDirty = true;
+  lastVirtualStart = -1;
+  lastVirtualEnd = -1;
   renderRequestList();
   renderDetail();
   updateStats();
@@ -211,6 +363,7 @@ function handleSessionsCleared() {
 
 function handleSessionsLoaded(sessions) {
   allSessions = sessions;
+  filterCacheDirty = true;
   applyFilters();
   updateStats();
 }
@@ -224,6 +377,7 @@ function setupFilters() {
       document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       currentFilter = chip.dataset.filter;
+      filterCacheDirty = true;
       applyFilters();
     });
   });
@@ -233,51 +387,148 @@ function setupFilters() {
       document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
       chip.classList.add('active');
       currentMethodFilter = chip.dataset.method;
+      filterCacheDirty = true;
       applyFilters();
     });
   });
 }
 
-function applyFilters() {
-  filteredSessions = allSessions.filter(session => {
-    // Content type filter
-    if (currentFilter !== 'all' && session.contentType !== currentFilter) {
-      if (currentFilter === 'xhr') {
-        if (!['json', 'xml', 'text'].includes(session.contentType)) return false;
-      } else {
-        return false;
-      }
-    }
-
-    // Method filter
-    if (currentMethodFilter !== 'all' && session.method !== currentMethodFilter) {
+/** Check if a single session matches all active filters */
+function sessionMatchesFilters(session) {
+  // Content type filter
+  if (currentFilter !== 'all' && session.contentType !== currentFilter) {
+    if (currentFilter === 'xhr') {
+      if (!['json', 'xml', 'text'].includes(session.contentType)) return false;
+    } else {
       return false;
     }
+  }
 
-    // Search filter
-    if (currentSearch) {
-      const searchLower = currentSearch.toLowerCase();
-      const matchFields = [
-        session.url,
-        session.host,
-        session.path,
-        session.method,
-        session.statusCode?.toString(),
-        session.contentType,
-        session.mimeType
-      ];
-      if (!matchFields.some(f => f && f.toLowerCase().includes(searchLower))) {
-        return false;
-      }
+  // Method filter
+  if (currentMethodFilter !== 'all' && session.method !== currentMethodFilter) return false;
+
+  // Status code range filter
+  if (currentStatusFilter !== 'all') {
+    const code = session.statusCode || 0;
+    switch (currentStatusFilter) {
+      case '2xx': if (code < 200 || code >= 300) return false; break;
+      case '3xx': if (code < 300 || code >= 400) return false; break;
+      case '4xx': if (code < 400 || code >= 500) return false; break;
+      case '5xx': if (code < 500 || code >= 600) return false; break;
+      case 'err': if (code < 400) return false; break;
     }
+  }
 
-    return true;
-  });
+  // Duration range filter
+  if (filterMinDuration > 0 && (session.duration || 0) < filterMinDuration) return false;
+  if (filterMaxDuration < Infinity && (session.duration || 0) > filterMaxDuration) return false;
+
+  // Size range filter
+  if (filterMinSize > 0 && (session.responseSize || 0) < filterMinSize) return false;
+  if (filterMaxSize < Infinity && (session.responseSize || 0) > filterMaxSize) return false;
+
+  // Domain filter
+  if (currentDomainFilter && session.host) {
+    if (!session.host.toLowerCase().includes(currentDomainFilter)) return false;
+  } else if (currentDomainFilter) {
+    return false;
+  }
+
+  // Search filter (text or regex)
+  if (currentSearch) {
+    if (searchIsRegex) {
+      try {
+        const re = new RegExp(currentSearch, 'i');
+        const matchFields = [session.url, session.host, session.path, session.method,
+          session.statusCode?.toString(), session.contentType, session.mimeType];
+        if (!matchFields.some(f => f && re.test(f))) return false;
+      } catch (e) {
+        // Invalid regex, treat as literal
+        return sessionMatchesTextSearch(session);
+      }
+    } else {
+      if (!sessionMatchesTextSearch(session)) return false;
+    }
+  }
+
+  return true;
+}
+
+function sessionMatchesTextSearch(session) {
+  const searchLower = currentSearch.toLowerCase();
+  const matchFields = [session.url, session.host, session.path, session.method,
+    session.statusCode?.toString(), session.contentType, session.mimeType];
+  return matchFields.some(f => f && f.toLowerCase().includes(searchLower));
+}
+
+function parseSizeInput(val) {
+  if (!val) return 0;
+  val = val.toString().trim().toLowerCase();
+  if (val.endsWith('kb')) return parseFloat(val) * 1024;
+  if (val.endsWith('mb')) return parseFloat(val) * 1024 * 1024;
+  if (val.endsWith('gb')) return parseFloat(val) * 1024 * 1024 * 1024;
+  return parseInt(val) || 0;
+}
+
+function clearAllFilters() {
+  currentFilter = 'all';
+  currentMethodFilter = 'all';
+  currentStatusFilter = 'all';
+  currentDomainFilter = '';
+  currentSearch = '';
+  filterMinDuration = 0;
+  filterMaxDuration = Infinity;
+  filterMinSize = 0;
+  filterMaxSize = Infinity;
+  searchIsRegex = false;
+
+  // Reset UI
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  document.querySelector('.filter-chip[data-filter="all"]')?.classList.add('active');
+  document.querySelectorAll('.method-chip').forEach(c => c.classList.remove('active'));
+  document.querySelector('.method-chip[data-method="all"]')?.classList.add('active');
+  document.querySelectorAll('.status-chip').forEach(c => c.classList.remove('active'));
+  document.querySelector('.status-chip[data-status="all"]')?.classList.add('active');
+  const si = document.getElementById('search-input');
+  if (si) si.value = '';
+  document.getElementById('search-clear')?.classList.remove('visible');
+  document.getElementById('search-regex-toggle')?.classList.remove('active');
+  const df = document.getElementById('filter-domain');
+  if (df) df.value = '';
+  const dmin = document.getElementById('filter-duration-min');
+  if (dmin) dmin.value = '';
+  const dmax = document.getElementById('filter-duration-max');
+  if (dmax) dmax.value = '';
+  const smin = document.getElementById('filter-size-min');
+  if (smin) smin.value = '';
+  const smax = document.getElementById('filter-size-max');
+  if (smax) smax.value = '';
+
+  filterCacheDirty = true;
+  applyFilters();
+}
+
+function getFilterKey() {
+  return `${currentFilter}|${currentMethodFilter}|${currentStatusFilter}|${currentSearch}|${searchIsRegex}|${currentDomainFilter}|${filterMinDuration}|${filterMaxDuration}|${filterMinSize}|${filterMaxSize}|${allSessions.length}`;
+}
+
+function applyFilters() {
+  const key = getFilterKey();
+  // Skip redundant re-filtering
+  if (!filterCacheDirty && key === lastFilterKey) {
+    return;
+  }
+  lastFilterKey = key;
+  filterCacheDirty = false;
+
+  filteredSessions = allSessions.filter(sessionMatchesFilters);
 
   // Sort
   filteredSessions.sort((a, b) => {
     let aVal = a[sortColumn];
     let bVal = b[sortColumn];
+    if (aVal == null) aVal = '';
+    if (bVal == null) bVal = '';
     if (typeof aVal === 'string') aVal = aVal.toLowerCase();
     if (typeof bVal === 'string') bVal = bVal.toLowerCase();
     if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
@@ -286,42 +537,115 @@ function applyFilters() {
   });
 
   renderRequestList();
+  updateActiveFilterCount();
+}
+
+function updateActiveFilterCount() {
+  let count = 0;
+  if (currentFilter !== 'all') count++;
+  if (currentMethodFilter !== 'all') count++;
+  if (currentStatusFilter !== 'all') count++;
+  if (currentDomainFilter) count++;
+  if (currentSearch) count++;
+  if (filterMinDuration > 0) count++;
+  if (filterMaxDuration < Infinity) count++;
+  if (filterMinSize > 0) count++;
+  if (filterMaxSize < Infinity) count++;
+
+  const badge = document.getElementById('active-filter-count');
+  if (badge) {
+    badge.textContent = count;
+    badge.classList.toggle('hidden', count === 0);
+  }
+  const clearBtn = document.getElementById('btn-clear-filters');
+  if (clearBtn) clearBtn.classList.toggle('hidden', count === 0);
 }
 
 // ============================
-// Request List Rendering
+// Request List Rendering (Virtual Scrolling)
 // ============================
 function renderRequestList() {
   const list = document.getElementById('request-list');
   const emptyState = document.getElementById('empty-state');
 
   if (filteredSessions.length === 0) {
-    // Clear existing rows but keep empty state
     const rows = list.querySelectorAll('.request-row');
     rows.forEach(r => r.remove());
+    if (virtualSpacer) virtualSpacer.style.height = '0px';
     emptyState.classList.remove('hidden');
+    updateStats();
     return;
   }
 
   emptyState.classList.add('hidden');
 
-  // For performance with large lists, use virtual scrolling concept
-  // But for simplicity, directly render (with limit for very large lists)
-  const fragment = document.createDocumentFragment();
-  const maxRender = Math.min(filteredSessions.length, 5000);
+  // Initialize virtual scroll container if needed
+  if (!virtualContainer) {
+    virtualContainer = list;
+    virtualSpacer = document.createElement('div');
+    virtualSpacer.className = 'virtual-spacer';
+    virtualSpacer.style.cssText = 'width:100%;pointer-events:none;flex-shrink:0;';
+    list.appendChild(virtualSpacer);
 
-  for (let i = 0; i < maxRender; i++) {
+    list.addEventListener('scroll', onVirtualScroll, { passive: true });
+    // Recalc visible count on resize
+    new ResizeObserver(() => {
+      virtualVisibleCount = Math.ceil(list.clientHeight / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+      renderVirtualRows();
+    }).observe(list);
+  }
+
+  virtualVisibleCount = Math.ceil(list.clientHeight / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+  virtualSpacer.style.height = (filteredSessions.length * VIRTUAL_ROW_HEIGHT) + 'px';
+  renderVirtualRows();
+  updateStats();
+}
+
+let lastVirtualStart = -1;
+let lastVirtualEnd = -1;
+
+function onVirtualScroll() {
+  renderVirtualRows();
+}
+
+function renderVirtualRows() {
+  if (!virtualContainer) return;
+
+  const scrollTop = virtualContainer.scrollTop;
+  const startIndex = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
+  const endIndex = Math.min(filteredSessions.length, startIndex + virtualVisibleCount + VIRTUAL_OVERSCAN);
+
+  // Skip if same range
+  if (startIndex === lastVirtualStart && endIndex === lastVirtualEnd) return;
+  lastVirtualStart = startIndex;
+  lastVirtualEnd = endIndex;
+
+  // Remove existing rows
+  const existing = virtualContainer.querySelectorAll('.request-row');
+  existing.forEach(r => r.remove());
+
+  const fragment = document.createDocumentFragment();
+
+  // Top spacer (pushes visible rows into correct position)
+  const topPad = document.createElement('div');
+  topPad.className = 'request-row virtual-pad';
+  topPad.style.cssText = `height:${startIndex * VIRTUAL_ROW_HEIGHT}px;padding:0;border:0;pointer-events:none;display:block;`;
+  fragment.appendChild(topPad);
+
+  for (let i = startIndex; i < endIndex; i++) {
     const session = filteredSessions[i];
+    if (!session) continue;
     const row = createRequestRow(session);
+    row.style.height = VIRTUAL_ROW_HEIGHT + 'px';
     fragment.appendChild(row);
   }
 
-  // Clear existing rows
-  const existingRows = list.querySelectorAll('.request-row');
-  existingRows.forEach(r => r.remove());
-
-  list.appendChild(fragment);
-  updateStats();
+  // Insert before the spacer
+  if (virtualSpacer && virtualSpacer.parentNode === virtualContainer) {
+    virtualContainer.insertBefore(fragment, virtualSpacer);
+  } else {
+    virtualContainer.appendChild(fragment);
+  }
 }
 
 function createRequestRow(session) {
