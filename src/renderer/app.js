@@ -368,6 +368,9 @@ function updateVisibleRow(sessionId) {
 
   const statusClass = getStatusClass(session.statusCode);
   const methodClass = `method-${session.method}`;
+  const protocolDisplay = session.isDecrypted 
+    ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
+    : (session.protocol || 'HTTP');
 
   // Remove pending class if no longer pending
   if (!session.isPending) {
@@ -384,7 +387,7 @@ function updateVisibleRow(sessionId) {
     <div class="td td-number">${session.number || ''}</div>
     <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
     <div class="td td-method ${methodClass}">${session.method}</div>
-    <div class="td td-protocol">${session.protocol || 'HTTP'}</div>
+    <div class="td td-protocol">${protocolDisplay}</div>
     <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
     <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
     <div class="td td-type">${session.contentType || ''}</div>
@@ -758,12 +761,15 @@ function createRequestRow(session) {
 
   const statusClass = getStatusClass(session.statusCode);
   const methodClass = `method-${session.method}`;
+  const protocolDisplay = session.isDecrypted 
+    ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
+    : (session.protocol || 'HTTP');
 
   row.innerHTML = `
     <div class="td td-number">${session.number || ''}</div>
     <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
     <div class="td td-method ${methodClass}">${session.method}</div>
-    <div class="td td-protocol">${session.protocol || 'HTTP'}</div>
+    <div class="td td-protocol">${protocolDisplay}</div>
     <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
     <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
     <div class="td td-type">${session.contentType || ''}</div>
@@ -860,6 +866,11 @@ function renderSummary(session) {
     ? '<span class="pending-badge">⏳ Pending</span>' 
     : `<span class="${getStatusClass(session.statusCode)} summary-value status">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
   html += summaryRow('Protocol', session.protocol || 'HTTP');
+  if (session.isDecrypted) {
+    html += summaryRow('Decryption', '<span class="badge badge-decrypted">🔓 MITM Decrypted</span>');
+  } else if (session.protocol === 'HTTPS' && session.isTunnel) {
+    html += summaryRow('Decryption', '<span class="badge badge-tunnel">🔒 Opaque Tunnel</span>');
+  }
   html += summaryRow('Host', session.host);
   html += summaryRow('Path', session.path);
   html += summaryRow('Timestamp', session.timestamp ? new Date(session.timestamp).toLocaleString() : '—');
@@ -878,6 +889,9 @@ function renderSummary(session) {
   html += '<div class="summary-section">';
   html += '<div class="summary-section-title"><span class="direction-out">→ Outgoing Request</span></div>';
   html += '<div class="summary-grid">';
+
+  // Request line — the key info: what was sent where
+  html += summaryRow('Request Line', `<code class="request-line"><span class="method-${session.method}">${session.method}</span> ${escapeHtml(session.url)}</code>`);
   html += summaryRow('Request Size', formatBytes(session.requestSize));
   
   const reqCt = session.requestHeaders?.['content-type'];
@@ -912,11 +926,21 @@ function renderSummary(session) {
     html += summaryRow('Authorization', `<span class="badge badge-info">${escapeHtml(authType)}</span> ****`);
   }
 
-  // Request body info
-  if (session.requestBody) {
-    const bodyLen = session.requestBody.length;
-    const bodyPreview = session.requestBody.substring(0, 100);
-    html += summaryRow('Body', `<span class="text-muted">${bodyLen} chars</span> <code class="summary-code-preview">${escapeHtml(bodyPreview)}${bodyLen > 100 ? '...' : ''}</code>`);
+  // Cookies sent
+  const cookieHeader = session.requestHeaders?.['cookie'];
+  if (cookieHeader) {
+    let cookieHtml = '<div class="summary-params">';
+    cookieHeader.split(';').forEach(c => {
+      const trimmed = c.trim();
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx > 0) {
+        const key = trimmed.substring(0, eqIdx);
+        const val = trimmed.substring(eqIdx + 1);
+        cookieHtml += `<span class="param-chip cookie-chip"><strong>${escapeHtml(key)}</strong>=${escapeHtml(val.length > 30 ? val.substring(0, 30) + '...' : val)}</span>`;
+      }
+    });
+    cookieHtml += '</div>';
+    html += summaryRow('Cookies Sent', cookieHtml);
   }
 
   // Query parameters inline
@@ -931,6 +955,60 @@ function renderSummary(session) {
       html += summaryRow('Query Params', paramsHtml);
     }
   } catch (e) {}
+
+  // === POST / PUT Body — rich parsing ===
+  if (session.requestBody) {
+    const bodyStr = session.requestBody;
+    const bodyLen = bodyStr.length;
+    const ct = (reqCt || '').toLowerCase();
+
+    html += '<tr><td colspan="2" class="summary-subsection">📤 Request Body</td></tr>';
+    html += summaryRow('Body Size', `${formatBytes(bodyLen)} (${bodyLen} chars)`);
+
+    // JSON body — parsed and formatted
+    if (ct.includes('json') || bodyStr.trim().startsWith('{') || bodyStr.trim().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(bodyStr);
+        html += summaryRow('Format', '<span class="badge badge-info">JSON</span>');
+        let jsonHtml = '<div class="body-preview-box"><pre class="body-json">';
+        jsonHtml += syntaxHighlightJSON(JSON.stringify(parsed, null, 2));
+        jsonHtml += '</pre></div>';
+        html += summaryRow('Body Content', jsonHtml);
+      } catch (e) {
+        html += summaryRow('Body Preview', `<code class="summary-code-preview">${escapeHtml(bodyStr.substring(0, 500))}${bodyLen > 500 ? '...' : ''}</code>`);
+      }
+    }
+    // Form URL-encoded — parse key=value pairs
+    else if (ct.includes('x-www-form-urlencoded')) {
+      html += summaryRow('Format', '<span class="badge badge-info">Form URL-Encoded</span>');
+      let formHtml = '<div class="summary-params form-params">';
+      try {
+        const params = new URLSearchParams(bodyStr);
+        params.forEach((val, key) => {
+          formHtml += `<div class="form-param-row"><span class="form-param-key">${escapeHtml(key)}</span><span class="form-param-eq">=</span><span class="form-param-val">${escapeHtml(val)}</span></div>`;
+        });
+      } catch (e) {
+        formHtml += escapeHtml(bodyStr.substring(0, 500));
+      }
+      formHtml += '</div>';
+      html += summaryRow('Form Data', formHtml);
+    }
+    // Multipart form data
+    else if (ct.includes('multipart/form-data')) {
+      html += summaryRow('Format', '<span class="badge badge-info">Multipart Form</span>');
+      html += summaryRow('Body Preview', `<code class="summary-code-preview">${escapeHtml(bodyStr.substring(0, 500))}${bodyLen > 500 ? '...' : ''}</code>`);
+    }
+    // XML body
+    else if (ct.includes('xml') || bodyStr.trim().startsWith('<?xml') || bodyStr.trim().startsWith('<')) {
+      html += summaryRow('Format', '<span class="badge badge-info">XML</span>');
+      html += summaryRow('Body Content', `<div class="body-preview-box"><pre>${escapeHtml(bodyStr.substring(0, 1000))}${bodyLen > 1000 ? '...' : ''}</pre></div>`);
+    }
+    // Plain text / other
+    else {
+      html += summaryRow('Format', `<span class="badge badge-muted">${ct ? escapeHtml(ct.split(';')[0]) : 'text'}</span>`);
+      html += summaryRow('Body Preview', `<code class="summary-code-preview">${escapeHtml(bodyStr.substring(0, 500))}${bodyLen > 500 ? '...' : ''}</code>`);
+    }
+  }
 
   html += '</div></div>';
 

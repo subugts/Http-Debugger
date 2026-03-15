@@ -38,6 +38,12 @@ contextBridge.exposeInMainWorld('api', {
   addHighlightRule: (rule) => ipcRenderer.invoke('add-highlight-rule', rule),
   deleteHighlightRule: (ruleId) => ipcRenderer.invoke('delete-highlight-rule', ruleId),
 
+  // CA Certificate management (MITM)
+  getCAStatus: () => ipcRenderer.invoke('get-ca-status'),
+  installCACert: () => ipcRenderer.invoke('install-ca-cert'),
+  exportCACert: () => ipcRenderer.invoke('export-ca-cert'),
+  revealCACert: () => ipcRenderer.invoke('reveal-ca-cert'),
+
   // Events from main process
   onNewSession: (callback) => {
     ipcRenderer.on('new-session', (event, session) => callback(session));

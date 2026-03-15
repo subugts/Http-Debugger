@@ -2288,6 +2288,113 @@ body {
 }
 
 /* ============================
+   MITM Decryption Badges & Protocol
+   ============================ */
+.badge-decrypted {
+  background: rgba(166, 227, 161, 0.2);
+  color: var(--success);
+  border: 1px solid rgba(166, 227, 161, 0.3);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.protocol-decrypted {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* ============================
+   Request Line Display
+   ============================ */
+.request-line {
+  display: block;
+  background: var(--bg-tertiary);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+  line-height: 1.5;
+  border-left: 3px solid var(--text-accent);
+}
+
+/* ============================
+   Request Body Preview
+   ============================ */
+.body-preview-box {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 8px 12px;
+  max-height: 300px;
+  overflow: auto;
+  font-size: 11px;
+}
+
+.body-preview-box pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+
+.body-json {
+  line-height: 1.5;
+}
+
+/* Form URL-encoded params */
+.form-params {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-param-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+
+.form-param-key {
+  color: var(--text-accent);
+  font-weight: 600;
+  min-width: 80px;
+}
+
+.form-param-eq {
+  color: var(--text-tertiary);
+  margin: 0 2px;
+}
+
+.form-param-val {
+  color: var(--success);
+  word-break: break-all;
+}
+
+/* Cookie chips */
+.cookie-chip {
+  background: rgba(203, 166, 247, 0.15) !important;
+  border-color: rgba(203, 166, 247, 0.3) !important;
+}
+
+.badge-muted {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-light);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* ============================
    Responsive / Compact
    ============================ */
 @media (max-width: 1100px) {

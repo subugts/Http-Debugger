@@ -4,12 +4,16 @@ const net = require('net');
 const tls = require('tls');
 const url = require('url');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { execSync } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
+const forge = require('node-forge');
 
 /**
- * ProxyEngine - System-wide HTTP/HTTPS traffic sniffer
- * Automatically configures macOS system proxy to capture ALL local HTTP traffic.
+ * ProxyEngine - System-wide HTTP/HTTPS traffic sniffer with MITM decryption
+ * Automatically configures macOS system proxy to capture ALL local traffic.
+ * HTTPS traffic is decrypted via on-the-fly certificate generation.
  * No manual proxy configuration needed — just click Capture.
  */
 class ProxyEngine {
@@ -19,22 +23,309 @@ class ProxyEngine {
     this.onRequest = null;
     this.onSessionUpdate = null;
     this.isRunning = false;
-    this._ca = null;
-    this._certs = new Map();
+
+    // MITM CA certificate
+    this._caCert = null;
+    this._caKey = null;
+    this._caCertPEM = null;
+    this._caKeyPEM = null;
+
+    // Per-host certificate cache
+    this._certCache = new Map();
+
+    // Reusable RSA key pair for host certs (much faster than generating per-host)
+    this._hostKeyPair = null;
+
+    // Proxy settings backup
     this._originalProxySettings = {};
     this._networkServices = [];
+
+    // CA cert storage directory
+    this._certDir = path.join(require('os').homedir(), '.http-debugger');
+
+    // Initialize CA
+    this._initCA();
+  }
+
+  // ==========================================
+  // Certificate Authority (CA) Management
+  // ==========================================
+
+  /**
+   * Initialize or load the root CA certificate.
+   * Persistent — created once and reused across sessions.
+   */
+  _initCA() {
+    const caCertPath = path.join(this._certDir, 'ca-cert.pem');
+    const caKeyPath = path.join(this._certDir, 'ca-key.pem');
+    const caVersionPath = path.join(this._certDir, 'ca-version');
+    const CURRENT_CA_VERSION = '2'; // Bump this to force CA regeneration
+
+    try {
+      if (fs.existsSync(caCertPath) && fs.existsSync(caKeyPath)) {
+        // Check CA version — regenerate if outdated
+        let existingVersion = '0';
+        try { existingVersion = fs.readFileSync(caVersionPath, 'utf-8').trim(); } catch (e) { /* no version file */ }
+
+        if (existingVersion !== CURRENT_CA_VERSION) {
+          console.log(`[ProxyEngine] CA version mismatch (${existingVersion} vs ${CURRENT_CA_VERSION}), regenerating CA for better compatibility...`);
+          // Remove old CA from keychain before regenerating
+          try {
+            execSync('security delete-certificate -c "HTTP Debugger CA" /Library/Keychains/System.keychain 2>/dev/null || true', { encoding: 'utf-8', timeout: 5000 });
+          } catch (e) { /* ignore */ }
+          try {
+            execSync('security delete-certificate -c "HTTP Debugger CA" ~/Library/Keychains/login.keychain-db 2>/dev/null || true', { encoding: 'utf-8', timeout: 5000 });
+          } catch (e) { /* ignore */ }
+          this._generateCA();
+          return;
+        }
+
+        this._caCertPEM = fs.readFileSync(caCertPath, 'utf-8');
+        this._caKeyPEM = fs.readFileSync(caKeyPath, 'utf-8');
+        this._caCert = forge.pki.certificateFromPem(this._caCertPEM);
+        this._caKey = forge.pki.privateKeyFromPem(this._caKeyPEM);
+        console.log('[ProxyEngine] Loaded existing CA certificate (v' + CURRENT_CA_VERSION + ')');
+        return;
+      }
+    } catch (e) {
+      console.warn('[ProxyEngine] Could not load existing CA, generating new one:', e.message);
+    }
+
     this._generateCA();
   }
 
+  /**
+   * Generate a new root CA certificate for MITM
+   */
   _generateCA() {
+    console.log('[ProxyEngine] Generating new CA certificate for MITM decryption...');
+
+    const keys = forge.pki.rsa.generateKeyPair(2048);
+    const cert = forge.pki.createCertificate();
+
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = '01' + crypto.randomBytes(8).toString('hex');
+
+    // Backdate by 1 day to avoid clock-skew issues
+    const notBefore = new Date();
+    notBefore.setDate(notBefore.getDate() - 1);
+    cert.validity.notBefore = notBefore;
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(notBefore.getFullYear() + 10);
+
+    const attrs = [
+      { name: 'commonName', value: 'HTTP Debugger CA' },
+      { name: 'organizationName', value: 'HTTP Debugger' },
+      { name: 'countryName', value: 'US' },
+      { shortName: 'ST', value: 'California' },
+      { name: 'localityName', value: 'San Francisco' }
+    ];
+
+    cert.setSubject(attrs);
+    cert.setIssuer(attrs);
+
+    cert.setExtensions([
+      { name: 'basicConstraints', cA: true, critical: true, pathLenConstraint: 0 },
+      { name: 'keyUsage', keyCertSign: true, digitalSignature: true, cRLSign: true, critical: true },
+      { name: 'subjectKeyIdentifier' },
+      { name: 'authorityKeyIdentifier', keyIdentifier: true }
+    ]);
+
+    cert.sign(keys.privateKey, forge.md.sha256.create());
+
+    this._caCert = cert;
+    this._caKey = keys.privateKey;
+    this._caCertPEM = forge.pki.certificateToPem(cert);
+    this._caKeyPEM = forge.pki.privateKeyToPem(keys.privateKey);
+
+    // Clear host cert cache since we have a new CA
+    this._certCache.clear();
+    this._hostKeyPair = null;
+
+    // Save to disk
     try {
-      const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
-        modulusLength: 2048
-      });
-      this._caKey = privateKey;
-      this._caPublicKey = publicKey;
+      if (!fs.existsSync(this._certDir)) {
+        fs.mkdirSync(this._certDir, { recursive: true });
+      }
+      fs.writeFileSync(path.join(this._certDir, 'ca-cert.pem'), this._caCertPEM);
+      fs.writeFileSync(path.join(this._certDir, 'ca-key.pem'), this._caKeyPEM);
+      fs.writeFileSync(path.join(this._certDir, 'ca-version'), '2');
+      console.log('[ProxyEngine] CA certificate saved to', this._certDir);
     } catch (e) {
-      this._caKey = null;
+      console.warn('[ProxyEngine] Could not save CA to disk:', e.message);
+    }
+  }
+
+  /**
+   * Generate a TLS certificate for a specific hostname, signed by our CA
+   */
+  _getHostKeyPair() {
+    if (!this._hostKeyPair) {
+      this._hostKeyPair = forge.pki.rsa.generateKeyPair(2048);
+    }
+    return this._hostKeyPair;
+  }
+
+  _generateCertForHost(hostname) {
+    if (this._certCache.has(hostname)) {
+      return this._certCache.get(hostname);
+    }
+
+    // Reuse a single RSA key pair for all host certs (much faster)
+    const keys = this._getHostKeyPair();
+    const cert = forge.pki.createCertificate();
+
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = crypto.randomBytes(16).toString('hex');
+
+    // Backdate by 1 day to avoid clock-skew issues
+    const notBefore = new Date();
+    notBefore.setDate(notBefore.getDate() - 1);
+    cert.validity.notBefore = notBefore;
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(notBefore.getFullYear() + 1);
+
+    const subjectAttrs = [
+      { name: 'commonName', value: hostname },
+      { name: 'organizationName', value: 'HTTP Debugger' }
+    ];
+    cert.setSubject(subjectAttrs);
+    cert.setIssuer(this._caCert.subject.attributes);
+
+    // SAN extension — critical for modern browsers
+    const altNames = [];
+    if (net.isIP(hostname)) {
+      altNames.push({ type: 7, ip: hostname });
+    } else {
+      altNames.push({ type: 2, value: hostname });
+    }
+
+    cert.setExtensions([
+      { name: 'basicConstraints', cA: false, critical: true },
+      {
+        name: 'keyUsage',
+        digitalSignature: true,
+        keyEncipherment: true,
+        dataEncipherment: true,
+        critical: true
+      },
+      { name: 'extKeyUsage', serverAuth: true, clientAuth: true },
+      { name: 'subjectAltName', altNames: altNames, critical: false },
+      { name: 'subjectKeyIdentifier' },
+      {
+        name: 'authorityKeyIdentifier',
+        keyIdentifier: true,
+        authorityCertIssuer: true,
+        serialNumber: true
+      }
+    ]);
+
+    cert.sign(this._caKey, forge.md.sha256.create());
+
+    // IMPORTANT: Include CA cert in the chain so clients can verify the full chain
+    const result = {
+      cert: forge.pki.certificateToPem(cert) + this._caCertPEM,
+      key: forge.pki.privateKeyToPem(keys.privateKey)
+    };
+
+    this._certCache.set(hostname, result);
+    return result;
+  }
+
+  /** Get the CA certificate PEM for export/installation */
+  getCACertPEM() {
+    return this._caCertPEM;
+  }
+
+  /** Get the CA cert file path */
+  getCACertPath() {
+    return path.join(this._certDir, 'ca-cert.pem');
+  }
+
+  /**
+   * Install CA cert into macOS Keychain
+   */
+  installCACert() {
+    const certPath = this.getCACertPath();
+    if (!fs.existsSync(certPath)) {
+      return { success: false, error: 'CA certificate not found' };
+    }
+
+    // Method 1: Use osascript to get admin privileges with a nice dialog
+    try {
+      execSync(
+        `osascript -e 'do shell script "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \\"${certPath}\\"" with administrator privileges'`,
+        { encoding: 'utf-8', timeout: 60000 }
+      );
+      console.log('[ProxyEngine] CA certificate installed in macOS System Keychain (via osascript)');
+      return { success: true };
+    } catch (e) {
+      console.warn('[ProxyEngine] osascript system keychain failed:', e.message);
+    }
+
+    // Method 2: Direct security command (may fail without root)
+    try {
+      execSync(
+        `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${certPath}"`,
+        { encoding: 'utf-8', timeout: 30000 }
+      );
+      console.log('[ProxyEngine] CA certificate installed in macOS System Keychain');
+      return { success: true };
+    } catch (e) {
+      console.warn('[ProxyEngine] System keychain install failed:', e.message);
+    }
+
+    // Method 3: Install to user login keychain
+    try {
+      execSync(
+        `security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db "${certPath}"`,
+        { encoding: 'utf-8', timeout: 30000 }
+      );
+      console.log('[ProxyEngine] CA certificate installed in user Keychain');
+      return { success: true };
+    } catch (e2) {
+      console.warn('[ProxyEngine] User keychain install failed:', e2.message);
+    }
+
+    // Method 4: Trust settings import (another approach)
+    try {
+      // Create a trust settings plist for the cert
+      execSync(
+        `security add-certificates -k ~/Library/Keychains/login.keychain-db "${certPath}"`,
+        { encoding: 'utf-8', timeout: 30000 }
+      );
+      console.log('[ProxyEngine] CA certificate added to user Keychain (manual trust may be needed)');
+      return { success: true, needsManualTrust: true };
+    } catch (e3) {
+      return { success: false, error: 'Could not install CA certificate. Please install manually: ' + certPath };
+    }
+  }
+
+  /** Check if our CA cert is actually trusted for SSL */
+  isCATrusted() {
+    const certPath = this.getCACertPath();
+    if (!fs.existsSync(certPath)) return false;
+
+    // Method 1: Use security verify-cert to actually test trust (most reliable)
+    try {
+      execSync(
+        `security verify-cert -c "${certPath}" -p ssl 2>&1`,
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      return true;
+    } catch (e) {
+      // verify-cert returns non-zero if not trusted
+    }
+
+    // Method 2: Check if cert exists in any keychain
+    try {
+      const output = execSync(
+        `security find-certificate -c "HTTP Debugger CA" -p /Library/Keychains/System.keychain 2>/dev/null || security find-certificate -c "HTTP Debugger CA" -p ~/Library/Keychains/login.keychain-db 2>/dev/null`,
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      return output.includes('BEGIN CERTIFICATE');
+    } catch (e) {
+      return false;
     }
   }
 
@@ -42,15 +333,12 @@ class ProxyEngine {
   // macOS System Proxy Management
   // ==========================================
 
-  /**
-   * Detect all active network services (Wi-Fi, Ethernet, etc.)
-   */
   _detectNetworkServices() {
     try {
       const output = execSync('networksetup -listallnetworkservices', { encoding: 'utf-8' });
       const lines = output.split('\n').filter(l => l.trim() && !l.startsWith('An asterisk'));
       this._networkServices = lines;
-      console.log(`[ProxyEngine] Detected network services: ${lines.join(', ')}`);
+      console.log('[ProxyEngine] Detected network services:', lines.join(', '));
       return lines;
     } catch (e) {
       this._networkServices = ['Wi-Fi', 'Ethernet'];
@@ -58,9 +346,6 @@ class ProxyEngine {
     }
   }
 
-  /**
-   * Save current proxy settings so we can restore them later
-   */
   _saveOriginalProxySettings() {
     this._originalProxySettings = {};
     for (const service of this._networkServices) {
@@ -71,32 +356,22 @@ class ProxyEngine {
           http: this._parseProxyOutput(httpProxy),
           https: this._parseProxyOutput(httpsProxy)
         };
-      } catch (e) {
-        // Service might not support proxy settings
-      }
+      } catch (e) { /* skip */ }
     }
   }
 
   _parseProxyOutput(output) {
     const result = { enabled: false, server: '', port: 0 };
-    const lines = output.split('\n');
-    for (const line of lines) {
+    for (const line of output.split('\n')) {
       const [key, ...valueParts] = line.split(':');
       const value = valueParts.join(':').trim();
-      if (key.trim().toLowerCase() === 'enabled') {
-        result.enabled = value.toLowerCase() === 'yes';
-      } else if (key.trim().toLowerCase() === 'server') {
-        result.server = value;
-      } else if (key.trim().toLowerCase() === 'port') {
-        result.port = parseInt(value) || 0;
-      }
+      if (key.trim().toLowerCase() === 'enabled') result.enabled = value.toLowerCase() === 'yes';
+      else if (key.trim().toLowerCase() === 'server') result.server = value;
+      else if (key.trim().toLowerCase() === 'port') result.port = parseInt(value) || 0;
     }
     return result;
   }
 
-  /**
-   * Set system-wide HTTP & HTTPS proxy to our proxy server
-   */
   _enableSystemProxy() {
     const errors = [];
     for (const service of this._networkServices) {
@@ -105,19 +380,14 @@ class ProxyEngine {
         execSync(`networksetup -setwebproxystate "${service}" on`, { encoding: 'utf-8' });
         execSync(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 ${this.port}`, { encoding: 'utf-8' });
         execSync(`networksetup -setsecurewebproxystate "${service}" on`, { encoding: 'utf-8' });
-        console.log(`[ProxyEngine] ✅ System proxy set on: ${service}`);
+        console.log(`[ProxyEngine] System proxy set on: ${service}`);
       } catch (e) {
         errors.push(`${service}: ${e.message}`);
       }
     }
-    if (errors.length > 0) {
-      console.warn(`[ProxyEngine] ⚠️ Could not set proxy on some services:`, errors);
-    }
+    if (errors.length > 0) console.warn('[ProxyEngine] Could not set proxy on some services:', errors);
   }
 
-  /**
-   * Restore original system proxy settings
-   */
   _restoreSystemProxy() {
     for (const service of this._networkServices) {
       try {
@@ -134,13 +404,13 @@ class ProxyEngine {
         } else {
           execSync(`networksetup -setsecurewebproxystate "${service}" off`, { encoding: 'utf-8' });
         }
-        console.log(`[ProxyEngine] ✅ System proxy restored on: ${service}`);
+        console.log(`[ProxyEngine] System proxy restored on: ${service}`);
       } catch (e) {
         try {
           execSync(`networksetup -setwebproxystate "${service}" off`, { encoding: 'utf-8' });
           execSync(`networksetup -setsecurewebproxystate "${service}" off`, { encoding: 'utf-8' });
         } catch (e2) {
-          console.error(`[ProxyEngine] ❌ Failed to restore proxy on ${service}:`, e2.message);
+          console.error(`[ProxyEngine] Failed to restore proxy on ${service}:`, e2.message);
         }
       }
     }
@@ -152,17 +422,11 @@ class ProxyEngine {
 
   async start() {
     return new Promise((resolve, reject) => {
-      if (this.isRunning) {
-        resolve();
-        return;
-      }
+      if (this.isRunning) { resolve(); return; }
 
-      // 1. Detect network services
       this._detectNetworkServices();
-      // 2. Save current proxy settings
       this._saveOriginalProxySettings();
 
-      // 3. Create proxy server
       this.server = http.createServer((req, res) => {
         this._handleHttpRequest(req, res);
       });
@@ -179,16 +443,28 @@ class ProxyEngine {
         }
       });
 
-      // 4. Listen on 0.0.0.0 (all interfaces)
       this.server.listen(this.port, '0.0.0.0', () => {
         this.isRunning = true;
 
-        // 5. Set system proxy to route ALL traffic through us
         try {
           this._enableSystemProxy();
-          console.log(`[ProxyEngine] 🚀 Listening on 0.0.0.0:${this.port} — System proxy ACTIVE — capturing ALL local HTTP traffic`);
+          console.log(`[ProxyEngine] Listening on 0.0.0.0:${this.port} — System proxy ACTIVE — MITM decryption enabled`);
         } catch (e) {
-          console.warn(`[ProxyEngine] ⚠️ Could not auto-set system proxy: ${e.message}. Set it manually.`);
+          console.warn(`[ProxyEngine] Could not auto-set system proxy: ${e.message}`);
+        }
+
+        // Auto-install CA cert if not trusted
+        if (!this.isCATrusted()) {
+          console.log('[ProxyEngine] CA not trusted yet. Attempting auto-install...');
+          const result = this.installCACert();
+          if (result.success) {
+            console.log('[ProxyEngine] CA certificate auto-installed and trusted');
+          } else {
+            console.warn('[ProxyEngine] Could not auto-install CA:', result.error);
+            console.log('[ProxyEngine] Install manually from:', this.getCACertPath());
+          }
+        } else {
+          console.log('[ProxyEngine] CA certificate already trusted');
         }
 
         resolve();
@@ -198,7 +474,6 @@ class ProxyEngine {
 
   async stop() {
     return new Promise((resolve) => {
-      // 1. Restore system proxy FIRST (so network continues working)
       try {
         this._restoreSystemProxy();
         console.log('[ProxyEngine] System proxy restored.');
@@ -206,11 +481,7 @@ class ProxyEngine {
         console.error('[ProxyEngine] Error restoring system proxy:', e.message);
       }
 
-      if (!this.isRunning || !this.server) {
-        this.isRunning = false;
-        resolve();
-        return;
-      }
+      if (!this.isRunning || !this.server) { this.isRunning = false; resolve(); return; }
 
       this.server.close(() => {
         this.isRunning = false;
@@ -218,19 +489,15 @@ class ProxyEngine {
         resolve();
       });
 
-      // Force close after 3 seconds
-      setTimeout(() => {
-        this.isRunning = false;
-        resolve();
-      }, 3000);
+      setTimeout(() => { this.isRunning = false; resolve(); }, 3000);
     });
   }
 
   // ==========================================
-  // HTTP Request Handling
+  // HTTP Request Handling (plain HTTP + decrypted HTTPS)
   // ==========================================
 
-  _handleHttpRequest(clientReq, clientRes) {
+  _handleHttpRequest(clientReq, clientRes, isDecryptedHttps = false, targetHost = null, targetPort = null) {
     const startTime = Date.now();
     const sessionId = uuidv4();
 
@@ -238,11 +505,18 @@ class ProxyEngine {
     let parsedUrl;
 
     try {
-      if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+      if (isDecryptedHttps) {
+        const host = targetHost || clientReq.headers.host || 'localhost';
+        const port = targetPort || 443;
+        const portSuffix = port === 443 ? '' : `:${port}`;
+        targetUrl = `https://${host}${portSuffix}${clientReq.url}`;
+        parsedUrl = new URL(targetUrl);
+      } else if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
         parsedUrl = new URL(targetUrl);
       } else {
         const host = clientReq.headers.host || 'localhost';
         parsedUrl = new URL(`http://${host}${targetUrl}`);
+        targetUrl = parsedUrl.href;
       }
     } catch (e) {
       clientRes.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -250,18 +524,19 @@ class ProxyEngine {
       return;
     }
 
-    const targetHost = parsedUrl.hostname;
-    const targetPort = parsedUrl.port || 80;
+    const resolvedHost = parsedUrl.hostname;
+    const resolvedPort = parseInt(parsedUrl.port) || (isDecryptedHttps ? 443 : 80);
     const targetPath = parsedUrl.pathname + parsedUrl.search;
+    const protocol = isDecryptedHttps ? 'HTTPS' : 'HTTP';
 
-    if (!targetHost) {
+    if (!resolvedHost) {
       clientRes.writeHead(400, { 'Content-Type': 'text/plain' });
       clientRes.end('Bad Request: No host');
       return;
     }
 
-    // Skip requests to our own proxy to avoid infinite loops
-    if ((targetHost === '127.0.0.1' || targetHost === 'localhost') && parseInt(targetPort) === this.port) {
+    // Skip self-requests
+    if ((resolvedHost === '127.0.0.1' || resolvedHost === 'localhost') && resolvedPort === this.port) {
       clientRes.writeHead(200, { 'Content-Type': 'text/plain' });
       clientRes.end('HTTP Debugger Proxy Active');
       return;
@@ -272,8 +547,8 @@ class ProxyEngine {
       id: sessionId,
       method: clientReq.method,
       url: targetUrl,
-      protocol: 'HTTP',
-      host: targetHost,
+      protocol: protocol,
+      host: resolvedHost,
       path: targetPath,
       statusCode: 0,
       statusMessage: 'Pending...',
@@ -285,7 +560,8 @@ class ProxyEngine {
       responseSize: 0,
       duration: 0,
       requestTimestamp: startTime,
-      isPending: true
+      isPending: true,
+      isDecrypted: isDecryptedHttps
     });
     if (this.onRequest) {
       this.onRequest(pendingSession);
@@ -302,14 +578,17 @@ class ProxyEngine {
       proxyHeaders.host = parsedUrl.host;
 
       const proxyOptions = {
-        hostname: targetHost,
-        port: targetPort,
+        hostname: resolvedHost,
+        port: resolvedPort,
         path: targetPath,
         method: clientReq.method,
-        headers: proxyHeaders
+        headers: proxyHeaders,
+        rejectUnauthorized: false
       };
 
-      const proxyReq = http.request(proxyOptions, (proxyRes) => {
+      const lib = isDecryptedHttps ? https : http;
+
+      const proxyReq = lib.request(proxyOptions, (proxyRes) => {
         const responseChunks = [];
         proxyRes.on('data', (chunk) => responseChunks.push(chunk));
         proxyRes.on('end', () => {
@@ -325,8 +604,8 @@ class ProxyEngine {
             id: sessionId,
             method: clientReq.method,
             url: targetUrl,
-            protocol: 'HTTP',
-            host: targetHost,
+            protocol: protocol,
+            host: resolvedHost,
             path: targetPath,
             statusCode: proxyRes.statusCode,
             statusMessage: proxyRes.statusMessage,
@@ -340,7 +619,8 @@ class ProxyEngine {
             requestTimestamp: startTime,
             remoteAddress: proxyRes.socket?.remoteAddress,
             remotePort: proxyRes.socket?.remotePort,
-            isPending: false
+            isPending: false,
+            isDecrypted: isDecryptedHttps
           });
 
           if (this.onSessionUpdate) {
@@ -359,8 +639,8 @@ class ProxyEngine {
           id: sessionId,
           method: clientReq.method,
           url: targetUrl,
-          protocol: 'HTTP',
-          host: targetHost,
+          protocol: protocol,
+          host: resolvedHost,
           path: targetPath,
           statusCode: 502,
           statusMessage: 'Bad Gateway',
@@ -373,7 +653,8 @@ class ProxyEngine {
           duration: Date.now() - startTime,
           error: err.message,
           requestTimestamp: startTime,
-          isPending: false
+          isPending: false,
+          isDecrypted: isDecryptedHttps
         });
 
         if (this.onSessionUpdate) {
@@ -381,9 +662,7 @@ class ProxyEngine {
         }
       });
 
-      proxyReq.setTimeout(60000, () => {
-        proxyReq.destroy();
-      });
+      proxyReq.setTimeout(60000, () => { proxyReq.destroy(); });
 
       if (requestBody.length > 0) {
         proxyReq.write(requestBody);
@@ -393,16 +672,89 @@ class ProxyEngine {
   }
 
   // ==========================================
-  // HTTPS CONNECT Tunnel Handling
+  // HTTPS CONNECT — MITM Decryption
   // ==========================================
 
   _handleConnect(req, clientSocket, head) {
-    const startTime = Date.now();
     const [hostname, port] = req.url.split(':');
     const targetPort = parseInt(port) || 443;
+
+    // Tell client the tunnel is established
+    clientSocket.write(
+      'HTTP/1.1 200 Connection Established\r\n' +
+      'Proxy-Agent: HTTP-Debugger-MITM\r\n' +
+      '\r\n'
+    );
+
+    // Generate a TLS certificate for this hostname
+    let hostCert;
+    try {
+      hostCert = this._generateCertForHost(hostname);
+    } catch (err) {
+      console.error(`[ProxyEngine] Failed to generate cert for ${hostname}:`, err.message);
+      this._handleConnectFallback(req, clientSocket, head, hostname, targetPort);
+      return;
+    }
+
+    // Create TLS options with our fake cert + CA chain
+    const tlsOptions = {
+      key: hostCert.key,
+      cert: hostCert.cert,
+      ca: this._caCertPEM,
+      isServer: true,
+      SNICallback: (servername, cb) => {
+        try {
+          const sniCert = this._generateCertForHost(servername);
+          const ctx = tls.createSecureContext({
+            key: sniCert.key,
+            cert: sniCert.cert,
+            ca: this._caCertPEM
+          });
+          cb(null, ctx);
+        } catch (e) {
+          cb(e);
+        }
+      }
+    };
+
+    // Upgrade client socket to TLS (we pretend to be the target server)
+    const tlsSocket = new tls.TLSSocket(clientSocket, tlsOptions);
+
+    tlsSocket.on('error', (err) => {
+      // TLS handshake failed — client doesn't trust our CA or cert pinning
+      const errStr = (err.code || '') + ' ' + (err.message || '');
+      if (errStr.includes('alert') || errStr.includes('SSL') || errStr.includes('TLS') ||
+          errStr.includes('ECONNRESET') || errStr.includes('EPIPE') ||
+          errStr.includes('CERTIFICATE') || errStr.includes('handshake')) {
+        // Expected when client has cert pinning or doesn't trust our CA
+        // Don't spam the console for known cert-pinning apps
+      } else {
+        console.warn(`[ProxyEngine] MITM error for ${hostname}:`, err.message);
+      }
+      try { tlsSocket.destroy(); } catch (e) { /* already destroyed */ }
+    });
+
+    // Once TLS handshake succeeds, parse HTTP inside the tunnel
+    this._createMitmHttpServer(tlsSocket, hostname, targetPort);
+  }
+
+  /**
+   * Create a virtual HTTP server on the decrypted TLS socket
+   */
+  _createMitmHttpServer(tlsSocket, hostname, targetPort) {
+    const internalServer = http.createServer((req, res) => {
+      this._handleHttpRequest(req, res, true, hostname, targetPort);
+    });
+    internalServer.emit('connection', tlsSocket);
+  }
+
+  /**
+   * Fallback: opaque CONNECT tunnel when MITM fails
+   */
+  _handleConnectFallback(req, clientSocket, head, hostname, targetPort) {
+    const startTime = Date.now();
     const sessionId = uuidv4();
 
-    // === Streaming: emit pending CONNECT session immediately ===
     const pendingTunnel = this._createSession({
       id: sessionId,
       method: 'CONNECT',
@@ -411,29 +763,17 @@ class ProxyEngine {
       host: hostname,
       path: '/',
       statusCode: 0,
-      statusMessage: 'Connecting...',
+      statusMessage: 'Tunnel (no decryption)...',
       requestHeaders: req.headers || {},
       responseHeaders: {},
-      requestBody: null,
-      responseBody: null,
-      requestSize: 0,
-      responseSize: 0,
-      duration: 0,
       isTunnel: true,
       isPending: true,
+      isDecrypted: false,
       requestTimestamp: startTime
     });
-    if (this.onRequest) {
-      this.onRequest(pendingTunnel);
-    }
+    if (this.onRequest) { this.onRequest(pendingTunnel); }
 
     const serverSocket = net.connect(targetPort, hostname, () => {
-      clientSocket.write(
-        'HTTP/1.1 200 Connection Established\r\n' +
-        'Proxy-Agent: HTTP-Debugger\r\n' +
-        '\r\n'
-      );
-
       let requestSize = 0;
       let responseSize = 0;
       let sessionCreated = false;
@@ -441,18 +781,12 @@ class ProxyEngine {
       serverSocket.pipe(clientSocket);
       clientSocket.pipe(serverSocket);
 
-      clientSocket.on('data', (chunk) => {
-        requestSize += chunk.length;
-      });
-
-      serverSocket.on('data', (chunk) => {
-        responseSize += chunk.length;
-      });
+      clientSocket.on('data', (chunk) => { requestSize += chunk.length; });
+      serverSocket.on('data', (chunk) => { responseSize += chunk.length; });
 
       const createTunnelSession = () => {
         if (sessionCreated) return;
         sessionCreated = true;
-        const duration = Date.now() - startTime;
         const session = this._createSession({
           id: sessionId,
           method: 'CONNECT',
@@ -461,22 +795,18 @@ class ProxyEngine {
           host: hostname,
           path: '/',
           statusCode: 200,
-          statusMessage: 'Connection Established (Tunnel)',
+          statusMessage: 'Tunnel (opaque)',
           requestHeaders: req.headers || {},
           responseHeaders: {},
-          requestBody: null,
-          responseBody: `[HTTPS Tunnel — ${requestSize} bytes ↑ / ${responseSize} bytes ↓]`,
-          requestSize: requestSize,
-          responseSize: responseSize,
-          duration: duration,
+          responseBody: `[HTTPS Tunnel — ${requestSize} bytes up / ${responseSize} bytes down — not decrypted]`,
+          requestSize, responseSize,
+          duration: Date.now() - startTime,
           isTunnel: true,
+          isDecrypted: false,
           requestTimestamp: startTime,
           isPending: false
         });
-
-        if (this.onSessionUpdate) {
-          this.onSessionUpdate(session);
-        }
+        if (this.onSessionUpdate) { this.onSessionUpdate(session); }
       };
 
       serverSocket.on('end', createTunnelSession);
@@ -486,11 +816,7 @@ class ProxyEngine {
     });
 
     serverSocket.on('error', (err) => {
-      try {
-        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-        clientSocket.end();
-      } catch (e) { /* ignore */ }
-
+      try { clientSocket.end(); } catch (e) { /* ignore */ }
       const session = this._createSession({
         id: sessionId,
         method: 'CONNECT',
@@ -502,29 +828,23 @@ class ProxyEngine {
         statusMessage: 'Bad Gateway',
         requestHeaders: req.headers || {},
         responseHeaders: {},
-        requestBody: null,
         responseBody: `Error: ${err.message}`,
-        requestSize: 0,
-        responseSize: 0,
-        duration: Date.now() - startTime,
         error: err.message,
+        duration: Date.now() - startTime,
         requestTimestamp: startTime,
-        isPending: false
+        isPending: false,
+        isDecrypted: false
       });
-
-      if (this.onSessionUpdate) {
-        this.onSessionUpdate(session);
-      }
+      if (this.onSessionUpdate) { this.onSessionUpdate(session); }
     });
 
-    clientSocket.on('error', () => {
-      serverSocket.destroy();
-    });
-
-    serverSocket.setTimeout(120000, () => {
-      serverSocket.destroy();
-    });
+    clientSocket.on('error', () => { serverSocket.destroy(); });
+    serverSocket.setTimeout(120000, () => { serverSocket.destroy(); });
   }
+
+  // ==========================================
+  // Session Creation
+  // ==========================================
 
   _createSession(data) {
     const now = Date.now();
@@ -539,13 +859,14 @@ class ProxyEngine {
       statusMessage: data.statusMessage,
       requestHeaders: data.requestHeaders || {},
       responseHeaders: data.responseHeaders || {},
-      requestBody: data.requestBody,
-      responseBody: data.responseBody,
+      requestBody: data.requestBody || null,
+      responseBody: data.responseBody || null,
       requestSize: data.requestSize || 0,
       responseSize: data.responseSize || 0,
       duration: data.duration || 0,
       error: data.error || null,
       isTunnel: data.isTunnel || false,
+      isDecrypted: data.isDecrypted || false,
       contentType: this._getContentType(data.responseHeaders),
       mimeType: this._getMimeType(data.responseHeaders),
       timestamp: now,
