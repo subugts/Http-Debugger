@@ -960,7 +960,7 @@ function renderSummary(session) {
 
   // Visual duration bar
   if (session.duration) {
-    const durationColor = session.duration < 200 ? 'var(--status-success)' : session.duration < 1000 ? 'var(--text-accent)' : session.duration < 3000 ? 'var(--status-warning)' : 'var(--status-error)';
+    const durationColor = session.duration < 200 ? 'var(--success)' : session.duration < 1000 ? 'var(--text-accent)' : session.duration < 3000 ? 'var(--warning)' : 'var(--error)';
     const barPct = Math.min(100, (session.duration / 5000) * 100);
     html += `<div class="summary-label">Speed:</div><div class="summary-value">
       <div class="summary-duration-bar"><div class="summary-duration-fill" style="width:${barPct}%;background:${durationColor}"></div></div>
