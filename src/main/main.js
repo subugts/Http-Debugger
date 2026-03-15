@@ -2,10 +2,12 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme } = requir
 const path = require('path');
 const fs = require('fs');
 const ProxyEngine = require('./proxy-engine');
+const TCPProxy = require('./tcp-proxy');
 const TrafficModifier = require('./traffic-modifier');
 
 let mainWindow;
 let proxyEngine;
+let tcpProxy;
 let trafficModifier;
 let sessions = [];
 let requestCounter = 0;
@@ -51,11 +53,16 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     if (proxyEngine) proxyEngine.stop();
+    if (tcpProxy) tcpProxy.stopAll();
   });
 
   // Initialize proxy engine
   proxyEngine = new ProxyEngine(settings.proxyPort);
+  tcpProxy = new TCPProxy();
   trafficModifier = new TrafficModifier();
+
+  // Wire up TCP proxy events
+  setupTCPProxyEvents();
 
   setupIPC();
 }
@@ -353,6 +360,118 @@ function setupIPC() {
     shell.showItemInFolder(proxyEngine.getCACertPath());
     return { success: true };
   });
+
+  // ==========================================
+  // TCP Proxy Management
+  // ==========================================
+
+  ipcMain.handle('tcp-start-proxy', async (event, { localPort, targetHost, targetPort, label }) => {
+    try {
+      await tcpProxy.startProxy(localPort, targetHost, targetPort, label);
+      return { success: true, localPort, targetHost, targetPort };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('tcp-stop-proxy', async (event, localPort) => {
+    try {
+      await tcpProxy.stopProxy(localPort);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('tcp-stop-all', async () => {
+    try {
+      await tcpProxy.stopAll();
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('tcp-get-status', async () => {
+    return tcpProxy.getStatus();
+  });
+}
+
+/**
+ * Wire up TCP proxy events to the session system.
+ * Each TCP JSON packet becomes a session row in the debugger.
+ */
+function setupTCPProxyEvents() {
+  tcpProxy.onPacket = (packet) => {
+    requestCounter++;
+
+    const directionPrefix = packet.direction === 'outgoing' ? '→' : '←';
+    const methodDisplay = packet.direction === 'outgoing' ? 'TCP→' : 'TCP←';
+
+    // Build a session object compatible with the existing HTTP session format
+    const session = {
+      id: packet.id,
+      number: requestCounter,
+      method: methodDisplay,
+      url: `tcp://${packet.targetHost}:${packet.targetPort}`,
+      protocol: 'TCP',
+      host: packet.targetHost,
+      path: packet.action || packet.type || '/',
+      statusCode: packet.parsed ? 200 : 0,
+      statusMessage: packet.parsed ? 'OK' : 'Raw',
+      requestHeaders: {
+        'x-tcp-direction': packet.direction,
+        'x-tcp-connection': packet.connectionId,
+        'x-tcp-seq': String(packet.seq),
+        'x-tcp-local-port': String(packet.localPort),
+        'x-tcp-target': `${packet.targetHost}:${packet.targetPort}`,
+        'x-tcp-client': packet.clientAddr,
+        'x-tcp-label': packet.label || '',
+        'x-packet-type': packet.type || 'data',
+        'x-packet-action': packet.action || '',
+        'content-type': packet.parsed ? 'application/json' : 'text/plain'
+      },
+      responseHeaders: {
+        'content-type': packet.parsed ? 'application/json' : 'text/plain'
+      },
+      requestBody: packet.direction === 'outgoing' ? (packet.json || packet.raw) : null,
+      responseBody: packet.direction === 'incoming' ? (packet.json || packet.raw) : null,
+      requestSize: packet.direction === 'outgoing' ? packet.size : 0,
+      responseSize: packet.direction === 'incoming' ? packet.size : 0,
+      duration: 0,
+      error: null,
+      isTunnel: false,
+      isDecrypted: false,
+      isTCP: true,
+      tcpPacket: packet,
+      contentType: packet.parsed ? 'json' : 'text',
+      mimeType: packet.parsed ? 'application/json' : 'text/plain',
+      timestamp: new Date().toISOString(),
+      requestTimestamp: packet.timestamp,
+      responseTimestamp: packet.timestamp,
+      remoteAddress: packet.targetHost,
+      remotePort: packet.targetPort,
+      isPending: false
+    };
+
+    sessions.push(session);
+
+    if (sessions.length > settings.maxSessions) {
+      sessions = sessions.slice(-settings.maxSessions);
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('new-session', session);
+    }
+  };
+
+  tcpProxy.onConnection = (conn) => {
+    console.log(`[TCPProxy] New connection #${conn.connId}: ${conn.clientAddr} → ${conn.targetHost}:${conn.targetPort}`);
+  };
+
+  tcpProxy.onDisconnect = (conn) => {
+    console.log(`[TCPProxy] Connection #${conn.connId} closed: ${conn.outgoingPackets} out / ${conn.incomingPackets} in (${conn.outgoingBytes}B / ${conn.incomingBytes}B in ${conn.duration}ms)`);
+  };
 }
 
 async function startCapturing() {

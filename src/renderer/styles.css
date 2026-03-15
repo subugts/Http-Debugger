@@ -2405,3 +2405,349 @@ body {
     padding: 6px 8px;
   }
 }
+
+/* ============================
+   TCP Proxy Styles
+   ============================ */
+
+/* TCP filter chip accent */
+.filter-chip-tcp {
+  border-color: #89b4fa !important;
+}
+.filter-chip-tcp.active {
+  background: #89b4fa !important;
+  color: #1e1e2e !important;
+}
+
+/* TCP method chips */
+.method-chip-tcp {
+  border-color: #cba6f7 !important;
+  font-family: monospace;
+  font-size: 11px;
+}
+.method-chip-tcp.active {
+  background: #cba6f7 !important;
+  color: #1e1e2e !important;
+}
+
+/* Protocol badge in row */
+.protocol-tcp {
+  color: #89b4fa;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* TCP direction badges in row list */
+.tcp-direction {
+  font-weight: 700;
+  font-size: 11px;
+  font-family: monospace;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.tcp-direction.tcp-out {
+  color: #a6e3a1;
+  background: rgba(166, 227, 161, 0.12);
+}
+.tcp-direction.tcp-in {
+  color: #89dceb;
+  background: rgba(137, 220, 235, 0.12);
+}
+
+/* TCP status badges (JSON / RAW) */
+.tcp-status-ok {
+  color: #a6e3a1;
+  font-weight: 600;
+  font-size: 11px;
+  background: rgba(166, 227, 161, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.tcp-status-raw {
+  color: #f9e2af;
+  font-weight: 600;
+  font-size: 11px;
+  background: rgba(249, 226, 175, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+/* TCP Direction Banner in Summary */
+.tcp-direction-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+.tcp-direction-banner.tcp-dir-out {
+  background: linear-gradient(135deg, rgba(166, 227, 161, 0.15), rgba(166, 227, 161, 0.05));
+  border-left: 4px solid #a6e3a1;
+}
+.tcp-direction-banner.tcp-dir-in {
+  background: linear-gradient(135deg, rgba(137, 220, 235, 0.15), rgba(137, 220, 235, 0.05));
+  border-left: 4px solid #89dceb;
+}
+.tcp-dir-icon {
+  font-size: 20px;
+}
+.tcp-dir-label {
+  flex: 1;
+  color: var(--text-primary);
+}
+.tcp-dir-seq {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* TCP Connection ID */
+.tcp-conn-id {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: #cba6f7;
+  background: rgba(203, 166, 247, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tcp-target {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-weight: 600;
+  color: #89b4fa;
+}
+
+/* TCP badge variants */
+.badge-tcp-out {
+  background: rgba(166, 227, 161, 0.2);
+  color: #a6e3a1;
+  border: 1px solid rgba(166, 227, 161, 0.3);
+}
+.badge-tcp-in {
+  background: rgba(137, 220, 235, 0.2);
+  color: #89dceb;
+  border: 1px solid rgba(137, 220, 235, 0.3);
+}
+.badge-tcp-type {
+  background: rgba(203, 166, 247, 0.2);
+  color: #cba6f7;
+  border: 1px solid rgba(203, 166, 247, 0.3);
+}
+.badge-tcp-action {
+  background: rgba(250, 179, 135, 0.2);
+  color: #fab387;
+  border: 1px solid rgba(250, 179, 135, 0.3);
+}
+.badge-success {
+  background: rgba(166, 227, 161, 0.2);
+  color: #a6e3a1;
+}
+.badge-warning {
+  background: rgba(249, 226, 175, 0.2);
+  color: #f9e2af;
+}
+
+/* TCP Field Chips — quick preview of JSON keys */
+.tcp-field-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+  margin-bottom: 4px;
+}
+.tcp-field-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tcp-field-chip strong {
+  color: #89b4fa;
+  font-weight: 600;
+}
+.tcp-field-val {
+  color: #a6e3a1;
+}
+
+/* TCP JSON Content Box */
+.tcp-json-section {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.tcp-json-content {
+  background: var(--bg-primary);
+  border-radius: 0 0 8px 8px;
+}
+.tcp-json-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+.tcp-json-info {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.tcp-copy-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tcp-copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.tcp-json-pre {
+  padding: 12px;
+  margin: 0;
+  overflow: auto;
+  max-height: 500px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.body-raw {
+  padding: 12px;
+  margin: 0;
+  overflow: auto;
+  max-height: 400px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* TCP Proxy Modal styles */
+.tcp-modal-desc {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+.tcp-proxy-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tcp-proxy-status {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.tcp-status-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.tcp-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tcp-status-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tcp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tcp-status-dot.running {
+  background: #a6e3a1;
+  box-shadow: 0 0 6px rgba(166, 227, 161, 0.5);
+  animation: pulse-tcp 2s ease-in-out infinite;
+}
+@keyframes pulse-tcp {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.tcp-status-info {
+  flex: 1;
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.tcp-status-stats {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* TCP toolbar button accent */
+.toolbar-btn-tcp {
+  border: 1px solid rgba(137, 180, 250, 0.3) !important;
+}
+.toolbar-btn-tcp:hover {
+  background: rgba(137, 180, 250, 0.1) !important;
+}
+
+/* Dark/Light theme adaptation for TCP */
+[data-theme="light"] .tcp-direction.tcp-out {
+  color: #40a02b;
+  background: rgba(64, 160, 43, 0.1);
+}
+[data-theme="light"] .tcp-direction.tcp-in {
+  color: #04a5e5;
+  background: rgba(4, 165, 229, 0.1);
+}
+[data-theme="light"] .tcp-status-ok {
+  color: #40a02b;
+  background: rgba(64, 160, 43, 0.1);
+}
+[data-theme="light"] .tcp-status-raw {
+  color: #df8e1d;
+  background: rgba(223, 142, 29, 0.1);
+}
+[data-theme="light"] .protocol-tcp {
+  color: #1e66f5;
+}
+[data-theme="light"] .tcp-direction-banner.tcp-dir-out {
+  background: linear-gradient(135deg, rgba(64, 160, 43, 0.1), rgba(64, 160, 43, 0.03));
+  border-left-color: #40a02b;
+}
+[data-theme="light"] .tcp-direction-banner.tcp-dir-in {
+  background: linear-gradient(135deg, rgba(4, 165, 229, 0.1), rgba(4, 165, 229, 0.03));
+  border-left-color: #04a5e5;
+}
+[data-theme="light"] .tcp-conn-id {
+  color: #8839ef;
+  background: rgba(136, 57, 239, 0.08);
+}
+[data-theme="light"] .tcp-target {
+  color: #1e66f5;
+}
+[data-theme="light"] .tcp-field-chip strong {
+  color: #1e66f5;
+}
+[data-theme="light"] .tcp-field-val {
+  color: #40a02b;
+}

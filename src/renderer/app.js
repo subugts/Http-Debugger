@@ -63,6 +63,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupResize();
   setupModals();
   setupComposer();
+  setupTCPProxy();
   setupConverter();
   setupCharts();
   setupRules();
@@ -119,6 +120,10 @@ function setupToolbar() {
   });
   document.getElementById('btn-converter').addEventListener('click', () => showModal('modal-converter'));
   document.getElementById('btn-rules').addEventListener('click', () => showModal('modal-rules'));
+  document.getElementById('btn-tcp-proxy')?.addEventListener('click', () => {
+    showModal('modal-tcp-proxy');
+    refreshTCPStatus();
+  });
   document.getElementById('btn-save').addEventListener('click', () => window.api.saveSession());
   document.getElementById('btn-open').addEventListener('click', () => window.api.openSession());
   document.getElementById('btn-theme').addEventListener('click', toggleTheme);
@@ -368,9 +373,31 @@ function updateVisibleRow(sessionId) {
 
   const statusClass = getStatusClass(session.statusCode);
   const methodClass = `method-${session.method}`;
-  const protocolDisplay = session.isDecrypted 
-    ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
-    : (session.protocol || 'HTTP');
+
+  // TCP-specific display (match createRequestRow logic)
+  let protocolDisplay, methodDisplay, pathDisplay, statusDisplay;
+
+  if (session.isTCP) {
+    const isSend = session.method === 'TCP→';
+    protocolDisplay = `<span class="protocol-tcp" title="TCP JSON Packet">🔌 TCP</span>`;
+    methodDisplay = isSend
+      ? '<span class="tcp-direction tcp-out" title="Client → Server">TCP →</span>'
+      : '<span class="tcp-direction tcp-in" title="Server → Client">TCP ←</span>';
+    const pType = session.requestHeaders?.['x-packet-type'] || '';
+    const pAction = session.requestHeaders?.['x-packet-action'] || '';
+    const packetLabel = pAction ? `${pType}/${pAction}` : (pType || session.path || '/');
+    pathDisplay = escapeHtml(packetLabel);
+    statusDisplay = session.tcpPacket?.parsed 
+      ? '<span class="tcp-status-ok">JSON</span>' 
+      : '<span class="tcp-status-raw">RAW</span>';
+  } else {
+    protocolDisplay = session.isDecrypted 
+      ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
+      : (session.protocol || 'HTTP');
+    methodDisplay = session.method;
+    pathDisplay = escapeHtml(session.path || session.url || '');
+    statusDisplay = session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—');
+  }
 
   // Remove pending class if no longer pending
   if (!session.isPending) {
@@ -385,13 +412,13 @@ function updateVisibleRow(sessionId) {
 
   row.innerHTML = `
     <div class="td td-number">${session.number || ''}</div>
-    <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
-    <div class="td td-method ${methodClass}">${session.method}</div>
+    <div class="td td-status ${session.isTCP ? '' : statusClass}">${statusDisplay}</div>
+    <div class="td td-method ${session.isTCP ? '' : methodClass}">${methodDisplay}</div>
     <div class="td td-protocol">${protocolDisplay}</div>
     <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
-    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
+    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${pathDisplay}</div>
     <div class="td td-type">${session.contentType || ''}</div>
-    <div class="td td-size">${formatBytes(session.responseSize)}</div>
+    <div class="td td-size">${formatBytes(session.isTCP ? (session.requestSize || session.responseSize) : session.responseSize)}</div>
     <div class="td td-time">${session.isPending ? '<span class="pending-elapsed">...</span>' : formatDuration(session.duration)}</div>
   `;
 }
@@ -477,15 +504,22 @@ function setupFilters() {
 /** Check if a single session matches all active filters */
 function sessionMatchesFilters(session) {
   // Content type filter
-  if (currentFilter !== 'all' && session.contentType !== currentFilter) {
-    if (currentFilter === 'xhr') {
-      if (!['json', 'xml', 'text'].includes(session.contentType)) return false;
-    } else {
-      return false;
+  if (currentFilter === 'tcp') {
+    // TCP filter: only show TCP sessions
+    if (!session.isTCP) return false;
+  } else if (currentFilter !== 'all') {
+    // Non-TCP filters: exclude TCP sessions from specific content type filters
+    if (session.isTCP) return false;
+    if (session.contentType !== currentFilter) {
+      if (currentFilter === 'xhr') {
+        if (!['json', 'xml', 'text'].includes(session.contentType)) return false;
+      } else {
+        return false;
+      }
     }
   }
 
-  // Method filter
+  // Method filter (handles TCP→ and TCP← as methods)
   if (currentMethodFilter !== 'all' && session.method !== currentMethodFilter) return false;
 
   // Status code range filter
@@ -539,6 +573,19 @@ function sessionMatchesTextSearch(session) {
   const searchLower = currentSearch.toLowerCase();
   const matchFields = [session.url, session.host, session.path, session.method,
     session.statusCode?.toString(), session.contentType, session.mimeType];
+  
+  // Add TCP-specific fields to search
+  if (session.isTCP) {
+    matchFields.push(
+      session.requestHeaders?.['x-packet-type'],
+      session.requestHeaders?.['x-packet-action'],
+      session.requestHeaders?.['x-tcp-connection'],
+      session.requestHeaders?.['x-tcp-label'],
+      session.requestBody,
+      session.responseBody
+    );
+  }
+  
   return matchFields.some(f => f && f.toLowerCase().includes(searchLower));
 }
 
@@ -761,19 +808,46 @@ function createRequestRow(session) {
 
   const statusClass = getStatusClass(session.statusCode);
   const methodClass = `method-${session.method}`;
-  const protocolDisplay = session.isDecrypted 
-    ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
-    : (session.protocol || 'HTTP');
+
+  // TCP-specific protocol display
+  let protocolDisplay;
+  let methodDisplay;
+  let pathDisplay;
+  let statusDisplay;
+
+  if (session.isTCP) {
+    const isSend = session.method === 'TCP→';
+    protocolDisplay = `<span class="protocol-tcp" title="TCP JSON Packet">🔌 TCP</span>`;
+    methodDisplay = isSend
+      ? '<span class="tcp-direction tcp-out" title="Client → Server">TCP →</span>'
+      : '<span class="tcp-direction tcp-in" title="Server → Client">TCP ←</span>';
+    
+    // Show packet type and action in path column
+    const pType = session.requestHeaders?.['x-packet-type'] || '';
+    const pAction = session.requestHeaders?.['x-packet-action'] || '';
+    const packetLabel = pAction ? `${pType}/${pAction}` : (pType || session.path || '/');
+    pathDisplay = escapeHtml(packetLabel);
+    statusDisplay = session.tcpPacket?.parsed 
+      ? '<span class="tcp-status-ok">JSON</span>' 
+      : '<span class="tcp-status-raw">RAW</span>';
+  } else {
+    protocolDisplay = session.isDecrypted 
+      ? `<span class="protocol-decrypted" title="MITM Decrypted">🔓 HTTPS</span>` 
+      : (session.protocol || 'HTTP');
+    methodDisplay = session.method;
+    pathDisplay = escapeHtml(session.path || session.url || '');
+    statusDisplay = session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—');
+  }
 
   row.innerHTML = `
     <div class="td td-number">${session.number || ''}</div>
-    <div class="td td-status ${statusClass}">${session.isPending ? '<span class="pending-spinner">⏳</span>' : (session.statusCode || '—')}</div>
-    <div class="td td-method ${methodClass}">${session.method}</div>
+    <div class="td td-status ${session.isTCP ? '' : statusClass}">${statusDisplay}</div>
+    <div class="td td-method ${session.isTCP ? '' : methodClass}">${methodDisplay}</div>
     <div class="td td-protocol">${protocolDisplay}</div>
     <div class="td td-host" title="${escapeHtml(session.host || '')}">${escapeHtml(session.host || '')}</div>
-    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${escapeHtml(session.path || session.url || '')}</div>
+    <div class="td td-path" title="${escapeHtml(session.path || session.url || '')}">${pathDisplay}</div>
     <div class="td td-type">${session.contentType || ''}</div>
-    <div class="td td-size">${formatBytes(session.responseSize)}</div>
+    <div class="td td-size">${formatBytes(session.isTCP ? (session.requestSize || session.responseSize) : session.responseSize)}</div>
     <div class="td td-time">${session.isPending ? '<span class="pending-elapsed">...</span>' : formatDuration(session.duration)}</div>
   `;
 
@@ -849,6 +923,13 @@ function renderDetail() {
 }
 
 function renderSummary(session) {
+  // ===============================
+  // TCP Packet — special detailed view
+  // ===============================
+  if (session.isTCP) {
+    return renderTCPSummary(session);
+  }
+
   let html = '';
 
   // Pending session banner
@@ -1118,6 +1199,120 @@ function renderSummary(session) {
       <div class="summary-duration-bar"><div class="summary-duration-fill" style="width:${barPct}%;background:${durationColor}"></div></div>
       <span class="summary-duration-label">${session.duration < 200 ? 'Fast' : session.duration < 1000 ? 'Normal' : session.duration < 3000 ? 'Slow' : 'Very Slow'}</span>
     </div>`;
+  }
+  html += '</div></div>';
+
+  return html;
+}
+
+function renderTCPSummary(session) {
+  const pkt = session.tcpPacket || {};
+  const isSend = session.method === 'TCP→';
+  const dirLabel = isSend ? '→ Outgoing (Client → Server)' : '← Incoming (Server → Client)';
+  const dirClass = isSend ? 'tcp-dir-out' : 'tcp-dir-in';
+  const dirIcon = isSend ? '📤' : '📥';
+
+  let html = '';
+
+  // === Direction Banner ===
+  html += `<div class="tcp-direction-banner ${dirClass}">
+    <span class="tcp-dir-icon">${dirIcon}</span>
+    <span class="tcp-dir-label">${dirLabel}</span>
+    <span class="tcp-dir-seq">Packet #${pkt.seq || '?'}</span>
+  </div>`;
+
+  // === Connection Info Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title">🔌 TCP Connection</div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('Connection ID', `<code class="tcp-conn-id">${escapeHtml(pkt.connectionId || session.requestHeaders?.['x-tcp-connection'] || '—')}</code>`);
+  html += summaryRow('Target', `<span class="tcp-target">${escapeHtml(pkt.targetHost || session.host || '?')}:${pkt.targetPort || session.remotePort || '?'}</span>`);
+  html += summaryRow('Local Port', session.requestHeaders?.['x-tcp-local-port'] || '—');
+  html += summaryRow('Client', `<code>${escapeHtml(pkt.clientAddr || session.requestHeaders?.['x-tcp-client'] || '—')}</code>`);
+  if (pkt.label || session.requestHeaders?.['x-tcp-label']) {
+    html += summaryRow('Label', `<span class="badge badge-info">${escapeHtml(pkt.label || session.requestHeaders?.['x-tcp-label'])}</span>`);
+  }
+  html += summaryRow('Timestamp', session.timestamp ? new Date(session.timestamp).toLocaleString() : '—');
+  html += '</div></div>';
+
+  // === Packet Meta Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title">📦 Packet Info</div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('Direction', `<span class="badge ${isSend ? 'badge-tcp-out' : 'badge-tcp-in'}">${isSend ? '→ Outgoing' : '← Incoming'}</span>`);
+  html += summaryRow('Sequence #', `<strong>${pkt.seq || '?'}</strong>`);
+  html += summaryRow('Size', `<strong>${formatBytes(pkt.size || session.requestSize || session.responseSize)}</strong> (${pkt.size || session.requestSize || session.responseSize || 0} bytes)`);
+
+  const packetType = pkt.type || session.requestHeaders?.['x-packet-type'] || '';
+  const packetAction = pkt.action || session.requestHeaders?.['x-packet-action'] || '';
+  if (packetType) {
+    html += summaryRow('Packet Type', `<span class="badge badge-tcp-type">${escapeHtml(packetType)}</span>`);
+  }
+  if (packetAction) {
+    html += summaryRow('Action', `<span class="badge badge-tcp-action">${escapeHtml(packetAction)}</span>`);
+  }
+  html += summaryRow('Format', pkt.parsed 
+    ? '<span class="badge badge-success">✓ Valid JSON</span>'
+    : '<span class="badge badge-warning">Raw Data</span>');
+  html += '</div></div>';
+
+  // === JSON Content Section (the star of the show) ===
+  const bodyStr = isSend ? session.requestBody : session.responseBody;
+  if (bodyStr) {
+    html += '<div class="summary-section tcp-json-section">';
+    html += `<div class="summary-section-title">${dirIcon} ${isSend ? 'Sent Data' : 'Received Data'}</div>`;
+
+    if (pkt.parsed) {
+      // Show parsed JSON tree with all fields
+      try {
+        const parsed = typeof pkt.parsed === 'string' ? JSON.parse(pkt.parsed) : pkt.parsed;
+        
+        // Quick field summary chips
+        const topKeys = Object.keys(parsed);
+        if (topKeys.length > 0) {
+          html += '<div class="tcp-field-chips">';
+          topKeys.forEach(key => {
+            const val = parsed[key];
+            const valType = Array.isArray(val) ? `[${val.length}]` : typeof val;
+            const valPreview = typeof val === 'string' ? truncate(val, 20) : (typeof val === 'number' || typeof val === 'boolean' ? String(val) : valType);
+            html += `<span class="tcp-field-chip"><strong>${escapeHtml(key)}</strong>: <span class="tcp-field-val">${escapeHtml(valPreview)}</span></span>`;
+          });
+          html += '</div>';
+        }
+
+        // Full JSON tree
+        html += '<div class="tcp-json-content">';
+        html += `<div class="tcp-json-header">
+          <span class="tcp-json-info">${topKeys.length} field${topKeys.length !== 1 ? 's' : ''} • ${formatBytes(bodyStr.length)}</span>
+          <button class="tcp-copy-btn" onclick="navigator.clipboard.writeText(document.querySelector('.tcp-json-pre')?.textContent || '')">📋 Copy JSON</button>
+        </div>`;
+        html += `<pre class="body-json tcp-json-pre">${syntaxHighlightJSON(JSON.stringify(parsed, null, 2))}</pre>`;
+        html += '</div>';
+      } catch (e) {
+        // Fallback: show raw text
+        html += `<div class="tcp-json-content"><pre class="body-json tcp-json-pre">${escapeHtml(bodyStr)}</pre></div>`;
+      }
+    } else {
+      // Raw data view
+      html += '<div class="tcp-json-content">';
+      html += `<div class="tcp-json-header">
+        <span class="tcp-json-info">Raw data • ${formatBytes(bodyStr.length)}</span>
+      </div>`;
+      html += `<pre class="body-raw">${escapeHtml(bodyStr.substring(0, 2000))}${bodyStr.length > 2000 ? '\n... (truncated)' : ''}</pre>`;
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // === All TCP Headers (x-tcp-* metadata) ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title">🏷 Metadata</div>';
+  html += '<div class="summary-grid">';
+  const headers = session.requestHeaders || {};
+  for (const [key, val] of Object.entries(headers)) {
+    if (key.startsWith('x-tcp-') || key.startsWith('x-packet-')) {
+      html += summaryRow(key, `<code>${escapeHtml(val)}</code>`);
+    }
   }
   html += '</div></div>';
 
@@ -1718,6 +1913,81 @@ async function sendComposedRequest() {
   } else {
     responseEl.innerHTML = `<div class="text-error" style="padding: 12px;">Error: ${escapeHtml(result.error)}</div>`;
   }
+}
+
+// ============================
+// TCP Proxy Management
+// ============================
+function setupTCPProxy() {
+  const startBtn = document.getElementById('tcp-start-btn');
+  const stopBtn = document.getElementById('tcp-stop-btn');
+  const stopAllBtn = document.getElementById('tcp-stop-all-btn');
+
+  if (!startBtn) return;
+
+  startBtn.addEventListener('click', async () => {
+    const localPort = parseInt(document.getElementById('tcp-local-port').value);
+    const targetHost = document.getElementById('tcp-target-host').value.trim();
+    const targetPort = parseInt(document.getElementById('tcp-target-port').value);
+    const label = document.getElementById('tcp-proxy-label').value.trim();
+
+    if (!localPort || !targetHost || !targetPort) {
+      alert('Please fill in all required fields (Local Port, Target Host, Target Port)');
+      return;
+    }
+
+    startBtn.disabled = true;
+    startBtn.textContent = 'Starting...';
+
+    const result = await window.api.tcpStartProxy({ localPort, targetHost, targetPort, label });
+
+    startBtn.disabled = false;
+    startBtn.textContent = '▶ Start Proxy';
+
+    if (result.success) {
+      stopBtn.disabled = false;
+      refreshTCPStatus();
+    } else {
+      alert(`Failed to start TCP proxy: ${result.error}`);
+    }
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    const localPort = parseInt(document.getElementById('tcp-local-port').value);
+    await window.api.tcpStopProxy(localPort);
+    stopBtn.disabled = true;
+    refreshTCPStatus();
+  });
+
+  stopAllBtn.addEventListener('click', async () => {
+    await window.api.tcpStopAll();
+    stopBtn.disabled = true;
+    refreshTCPStatus();
+  });
+}
+
+async function refreshTCPStatus() {
+  const status = await window.api.tcpGetStatus();
+  const listEl = document.getElementById('tcp-status-list');
+  if (!listEl) return;
+
+  if (!status || status.length === 0) {
+    listEl.innerHTML = '<span class="text-muted">No active TCP proxies</span>';
+    return;
+  }
+
+  listEl.innerHTML = status.map(s => `
+    <div class="tcp-status-item">
+      <span class="tcp-status-dot running"></span>
+      <span class="tcp-status-info">
+        <strong>:${s.localPort}</strong> → ${s.targetHost}:${s.targetPort}
+        ${s.label ? `<span class="badge badge-info">${escapeHtml(s.label)}</span>` : ''}
+      </span>
+      <span class="tcp-status-stats">
+        ${s.connections || 0} conn${(s.connections || 0) !== 1 ? 's' : ''}
+      </span>
+    </div>
+  `).join('');
 }
 
 // ============================

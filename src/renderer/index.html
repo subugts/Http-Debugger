@@ -59,6 +59,10 @@
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3v1m0 16v1m8.66-13.5l-.87.5M4.21 16.5l-.87.5M20.66 16.5l-.87-.5M4.21 7.5l-.87-.5M16 12a4 4 0 11-8 0 4 4 0 018 0z" stroke="currentColor" fill="none" stroke-width="2"/></svg>
         <span>Rules</span>
       </button>
+      <button class="toolbar-btn toolbar-btn-tcp" id="btn-tcp-proxy" title="TCP JSON Proxy">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" fill="none" stroke-width="2"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="8" cy="18" r="2" fill="currentColor"/></svg>
+        <span>TCP Proxy</span>
+      </button>
     </div>
 
     <div class="toolbar-separator"></div>
@@ -110,6 +114,7 @@
   <div class="filter-bar" id="filter-bar">
     <div class="filter-chips">
       <button class="filter-chip active" data-filter="all">All</button>
+      <button class="filter-chip filter-chip-tcp" data-filter="tcp">🔌 TCP</button>
       <button class="filter-chip" data-filter="xhr">XHR</button>
       <button class="filter-chip" data-filter="html">HTML</button>
       <button class="filter-chip" data-filter="css">CSS</button>
@@ -130,6 +135,8 @@
       <button class="method-chip" data-method="PATCH">PATCH</button>
       <button class="method-chip" data-method="OPTIONS">OPTIONS</button>
       <button class="method-chip" data-method="CONNECT">CONNECT</button>
+      <button class="method-chip method-chip-tcp" data-method="TCP→">TCP→</button>
+      <button class="method-chip method-chip-tcp" data-method="TCP←">TCP←</button>
     </div>
     <div class="filter-divider"></div>
     <div class="status-chips">
@@ -552,6 +559,48 @@
           </div>
         </div>
         <div class="composer-response" id="resubmit-response"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TCP Proxy Modal -->
+  <div class="modal-overlay" id="modal-tcp-proxy">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🔌 TCP JSON Proxy</h3>
+        <button class="modal-close" data-close="modal-tcp-proxy">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="tcp-modal-desc">Intercept TCP JSON packets between a client and server. The proxy listens on a local port and forwards to the target, capturing all JSON packets in both directions.</p>
+        <div class="tcp-proxy-form">
+          <div class="form-group">
+            <label>Local Listen Port:</label>
+            <input type="number" id="tcp-local-port" value="9001" min="1024" max="65535" placeholder="9001">
+          </div>
+          <div class="form-group">
+            <label>Target Host:</label>
+            <input type="text" id="tcp-target-host" value="127.0.0.1" placeholder="127.0.0.1 or remote IP">
+          </div>
+          <div class="form-group">
+            <label>Target Port:</label>
+            <input type="number" id="tcp-target-port" value="9000" min="1" max="65535" placeholder="9000">
+          </div>
+          <div class="form-group">
+            <label>Label (optional):</label>
+            <input type="text" id="tcp-proxy-label" placeholder="e.g. GT Game Server">
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-primary" id="tcp-start-btn">▶ Start Proxy</button>
+            <button class="btn btn-danger" id="tcp-stop-btn" disabled>■ Stop Proxy</button>
+            <button class="btn btn-danger" id="tcp-stop-all-btn">■ Stop All</button>
+          </div>
+        </div>
+        <div class="tcp-proxy-status" id="tcp-proxy-status">
+          <div class="tcp-status-title">Active Proxies:</div>
+          <div class="tcp-status-list" id="tcp-status-list">
+            <span class="text-muted">No active TCP proxies</span>
+          </div>
+        </div>
       </div>
     </div>
   </div>

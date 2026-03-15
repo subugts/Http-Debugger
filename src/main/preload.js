@@ -44,6 +44,12 @@ contextBridge.exposeInMainWorld('api', {
   exportCACert: () => ipcRenderer.invoke('export-ca-cert'),
   revealCACert: () => ipcRenderer.invoke('reveal-ca-cert'),
 
+  // TCP Proxy management
+  tcpStartProxy: (opts) => ipcRenderer.invoke('tcp-start-proxy', opts),
+  tcpStopProxy: (localPort) => ipcRenderer.invoke('tcp-stop-proxy', localPort),
+  tcpStopAll: () => ipcRenderer.invoke('tcp-stop-all'),
+  tcpGetStatus: () => ipcRenderer.invoke('tcp-get-status'),
+
   // Events from main process
   onNewSession: (callback) => {
     ipcRenderer.on('new-session', (event, session) => callback(session));
