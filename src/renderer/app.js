@@ -1374,6 +1374,37 @@ function renderPreview(session) {
   const ct = (session.responseHeaders?.['content-type'] || session.mimeType || '').toLowerCase();
   const body = session.responseBody;
 
+  // TCP Packet — show JSON preview
+  if (session.isTCP) {
+    const tcpBody = session.requestBody || session.responseBody;
+    if (!tcpBody) return '<div class="detail-empty"><p>No TCP packet data to preview</p></div>';
+    
+    const isSend = session.method === 'TCP→';
+    if (looksLikeJSON(tcpBody)) {
+      try {
+        const parsed = JSON.parse(tcpBody);
+        const pretty = JSON.stringify(parsed, null, 2);
+        return `<div class="preview-container">
+          <div class="preview-toolbar">
+            <span class="preview-badge">${isSend ? '📤' : '📥'} TCP JSON Preview</span>
+            <span class="preview-meta">${formatBytes(tcpBody.length)} — ${Object.keys(parsed).length} top-level keys</span>
+            <div class="preview-actions">
+              <button class="preview-btn tcp-copy-btn" onclick="navigator.clipboard.writeText(document.querySelector('.json-preview')?.textContent || '')">📋 Copy</button>
+            </div>
+          </div>
+          <div class="code-view json-preview">${syntaxHighlightJSON(pretty)}</div>
+        </div>`;
+      } catch (e) { /* fall through */ }
+    }
+    return `<div class="preview-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">${isSend ? '📤' : '📥'} TCP Data Preview</span>
+        <span class="preview-meta">${formatBytes(tcpBody.length)}</span>
+      </div>
+      <div class="code-view">${escapeHtml(tcpBody)}</div>
+    </div>`;
+  }
+
   // HTTPS tunnel — no content
   if (session.isTunnel) {
     return `<div class="detail-empty">
