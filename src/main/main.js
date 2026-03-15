@@ -1,16 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const ProxyEngine = require('./proxy-engine');
 const TrafficModifier = require('./traffic-modifier');
-
-// Allow self-signed certificates for MITM proxy upstream connections
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-// Ignore certificate errors in Electron's Chromium for MITM-proxied content
-app.commandLine.appendSwitch('ignore-certificate-errors');
-app.commandLine.appendSwitch('allow-insecure-localhost');
-app.commandLine.appendSwitch('ignore-certificate-errors-spki-list', '');
 
 let mainWindow;
 let proxyEngine;
@@ -50,19 +42,6 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-
-  // Handle certificate errors from MITM proxy — always allow our own proxy's certs
-  mainWindow.webContents.on('certificate-error', (event, url, error, certificate, callback) => {
-    // If it's from our MITM proxy or localhost, allow it
-    event.preventDefault();
-    callback(true);
-  });
-
-  // Also set up the default session to bypass cert verification
-  session.defaultSession.setCertificateVerifyProc((request, callback) => {
-    // Allow all certificates (we are a debugging tool)
-    callback(0); // 0 = OK
-  });
 
   // Build menu
   const menuTemplate = buildMenu();
@@ -703,6 +682,7 @@ app.on('before-quit', () => {
 });
 
 process.on('SIGINT', () => {
+  try { ProxyEngine.forceDisableSystemProxy(); } catch (e) { /* ignore */ }
   if (proxyEngine && proxyEngine.isRunning) {
     proxyEngine.stop();
   }
@@ -710,6 +690,7 @@ process.on('SIGINT', () => {
 });
 
 process.on('SIGTERM', () => {
+  try { ProxyEngine.forceDisableSystemProxy(); } catch (e) { /* ignore */ }
   if (proxyEngine && proxyEngine.isRunning) {
     proxyEngine.stop();
   }
@@ -718,6 +699,10 @@ process.on('SIGTERM', () => {
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
+  // CRITICAL: Always force-restore system proxy on crash
+  try {
+    ProxyEngine.forceDisableSystemProxy();
+  } catch (e) { /* ignore */ }
   if (proxyEngine && proxyEngine.isRunning) {
     proxyEngine.stop();
   }
