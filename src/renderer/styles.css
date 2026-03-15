@@ -968,6 +968,35 @@ body {
   letter-spacing: 1px;
 }
 
+/* Pending Session Banner */
+.summary-pending-banner {
+  background: linear-gradient(135deg, rgba(250, 179, 135, 0.15), rgba(249, 226, 175, 0.1));
+  border: 1px solid rgba(250, 179, 135, 0.3);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warning);
+  animation: pendingPulse 2s ease-in-out infinite;
+}
+
+@keyframes pendingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.pending-badge {
+  display: inline-block;
+  background: rgba(250, 179, 135, 0.2);
+  color: var(--warning);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  animation: pendingPulse 2s ease-in-out infinite;
+}
+
 /* Headers View */
 .headers-table {
   width: 100%;
