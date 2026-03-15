@@ -37,8 +37,10 @@ let virtualSpacer = null;
 // Performance: Batch rendering
 let pendingSessions = [];
 let batchRAF = null;
-const BATCH_INTERVAL = 80; // ms - batch incoming sessions
+const BATCH_INTERVAL = 16; // ms - near-instant rendering for live feel
 let lastBatchFlush = 0;
+let sessionCounter = 0; // monotonically increasing for new-row detection
+let lastNewSessionIds = new Set(); // track recently added session IDs for animation
 
 // Performance: Search debounce
 let searchDebounceTimer = null;
@@ -297,8 +299,9 @@ function handleCaptureStatus(status) {
     captureBtn.disabled = true;
     captureBtn.classList.remove('primary');
     stopBtn.disabled = false;
-    statusEl.innerHTML = '<span class="status-dot running"></span><span class="status-text">🌐 Capturing ALL local traffic</span>';
-    sbStatus.textContent = 'Capturing...';
+    statusEl.innerHTML = '<span class="status-dot running pulse"></span><span class="status-text">🌐 Capturing ALL local traffic</span>';
+    sbStatus.textContent = '⚡ Live Capturing...';
+    sbStatus.classList.add('live-status');
     sbProxy.textContent = '🌐 System-wide Capture Active';
   } else {
     captureBtn.disabled = false;
@@ -306,6 +309,7 @@ function handleCaptureStatus(status) {
     stopBtn.disabled = true;
     statusEl.innerHTML = '<span class="status-dot stopped"></span><span class="status-text">Stopped</span>';
     sbStatus.textContent = 'Ready';
+    sbStatus.classList.remove('live-status');
     sbProxy.textContent = '🌐 System-wide Capture';
   }
 }
@@ -317,7 +321,11 @@ function handleNewSession(session) {
   allSessions.push(session);
   pendingSessions.push(session);
 
-  // Batch rendering with requestAnimationFrame
+  // Update live counter in status bar immediately
+  const sbReq = document.getElementById('sb-requests');
+  if (sbReq) sbReq.textContent = `Requests: ${allSessions.length}`;
+
+  // Batch rendering with requestAnimationFrame — near-instant
   if (!batchRAF) {
     batchRAF = requestAnimationFrame(flushPendingSessions);
   }
@@ -328,23 +336,31 @@ function flushPendingSessions() {
   if (pendingSessions.length === 0) return;
 
   const now = performance.now();
-  // Throttle: at most one full re-filter per BATCH_INTERVAL ms
-  if (now - lastBatchFlush < BATCH_INTERVAL && pendingSessions.length < 50) {
+  // Throttle: adaptive interval — fast for small batches, slightly throttled for large
+  const adaptiveInterval = pendingSessions.length > 100 ? 50 : BATCH_INTERVAL;
+  if (now - lastBatchFlush < adaptiveInterval && pendingSessions.length < 20) {
     batchRAF = requestAnimationFrame(flushPendingSessions);
     return;
   }
   lastBatchFlush = now;
 
-  // Check if pending sessions match current filters (fast path: append only)
-  const matchingNew = pendingSessions.filter(s => sessionMatchesFilters(s));
+  // Track new session IDs for highlight animation
+  lastNewSessionIds = new Set(pendingSessions.map(s => s.id));
+
   pendingSessions = [];
   filterCacheDirty = true;
   applyFilters();
   updateStats();
 
+  // Auto-scroll with smooth behavior
   if (settings.autoScroll && virtualContainer) {
     virtualContainer.scrollTop = virtualContainer.scrollHeight;
   }
+
+  // Clear new-row highlights after animation completes
+  setTimeout(() => {
+    lastNewSessionIds.clear();
+  }, 800);
 }
 
 function handleSessionsCleared() {
@@ -653,6 +669,11 @@ function createRequestRow(session) {
   row.className = 'request-row';
   row.dataset.id = session.id;
 
+  // New row animation
+  if (lastNewSessionIds.has(session.id)) {
+    row.classList.add('new-row');
+  }
+
   // Highlight classes
   if (settings.highlightErrors && session.statusCode >= 400) {
     row.classList.add('error-row');
@@ -738,6 +759,10 @@ function renderDetail() {
     case 'response-body':
       content.innerHTML = renderBody(selectedSession.responseBody, selectedSession.responseHeaders?.['content-type']);
       break;
+    case 'preview':
+      content.innerHTML = renderPreview(selectedSession);
+      setupPreviewFrame(selectedSession);
+      break;
     case 'cookies':
       content.innerHTML = renderCookies(selectedSession);
       break;
@@ -751,37 +776,199 @@ function renderDetail() {
 }
 
 function renderSummary(session) {
-  let html = '<div class="summary-grid">';
-  
-  html += summaryRow('URL', session.url);
+  let html = '';
+
+  // === General Info Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title">📋 General</div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('URL', `<span class="summary-url">${escapeHtml(session.url)}</span>`);
   html += summaryRow('Method', `<span class="method-${session.method}">${session.method}</span>`);
   html += summaryRow('Status', `<span class="${getStatusClass(session.statusCode)} summary-value status">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
-  html += summaryRow('Protocol', session.protocol);
+  html += summaryRow('Protocol', session.protocol || 'HTTP');
   html += summaryRow('Host', session.host);
   html += summaryRow('Path', session.path);
-  html += summaryRow('Content-Type', session.mimeType || '—');
-  html += summaryRow('Request Size', formatBytes(session.requestSize));
-  html += summaryRow('Response Size', formatBytes(session.responseSize));
-  html += summaryRow('Duration', formatDuration(session.duration));
   html += summaryRow('Timestamp', session.timestamp ? new Date(session.timestamp).toLocaleString() : '—');
-  
-  if (session.error) {
-    html += summaryRow('Error', `<span class="text-error">${escapeHtml(session.error)}</span>`);
-  }
   if (session.isTunnel) {
-    html += summaryRow('Type', '<span class="badge badge-info">HTTPS Tunnel</span>');
+    html += summaryRow('Type', '<span class="badge badge-tunnel">🔒 HTTPS Tunnel</span>');
   }
   if (session.isComposed) {
-    html += summaryRow('Source', '<span class="badge badge-info">Composed</span>');
+    html += summaryRow('Source', '<span class="badge badge-info">✍ Composed</span>');
   }
-  if (session.isRedirected) {
-    html += summaryRow('Redirected From', session.originalUrl || '—');
+  if (session.error) {
+    html += summaryRow('Error', `<span class="text-error">⚠ ${escapeHtml(session.error)}</span>`);
   }
-  if (session.isBlocked) {
-    html += summaryRow('Status', '<span class="badge badge-error">Blocked by Rule</span>');
+  html += '</div></div>';
+
+  // === Request (Outgoing →) Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title"><span class="direction-out">→ Outgoing Request</span></div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('Request Size', formatBytes(session.requestSize));
+  
+  const reqCt = session.requestHeaders?.['content-type'];
+  html += summaryRow('Content-Type', reqCt ? escapeHtml(reqCt) : '<span class="text-muted">—</span>');
+  
+  const reqEncoding = session.requestHeaders?.['content-encoding'];
+  html += summaryRow('Encoding', reqEncoding ? escapeHtml(reqEncoding) : '<span class="text-muted">none</span>');
+  
+  const userAgent = session.requestHeaders?.['user-agent'];
+  if (userAgent) {
+    html += summaryRow('User-Agent', `<span class="summary-truncate" title="${escapeHtml(userAgent)}">${escapeHtml(userAgent)}</span>`);
+  }
+  
+  const accept = session.requestHeaders?.['accept'];
+  if (accept) {
+    html += summaryRow('Accept', `<span class="summary-truncate" title="${escapeHtml(accept)}">${escapeHtml(accept)}</span>`);
   }
 
-  html += '</div>';
+  const referer = session.requestHeaders?.['referer'] || session.requestHeaders?.['referrer'];
+  if (referer) {
+    html += summaryRow('Referer', escapeHtml(referer));
+  }
+
+  const origin = session.requestHeaders?.['origin'];
+  if (origin) {
+    html += summaryRow('Origin', escapeHtml(origin));
+  }
+
+  const authorization = session.requestHeaders?.['authorization'];
+  if (authorization) {
+    const authType = authorization.split(' ')[0];
+    html += summaryRow('Authorization', `<span class="badge badge-info">${escapeHtml(authType)}</span> ****`);
+  }
+
+  // Request body info
+  if (session.requestBody) {
+    const bodyLen = session.requestBody.length;
+    const bodyPreview = session.requestBody.substring(0, 100);
+    html += summaryRow('Body', `<span class="text-muted">${bodyLen} chars</span> <code class="summary-code-preview">${escapeHtml(bodyPreview)}${bodyLen > 100 ? '...' : ''}</code>`);
+  }
+
+  // Query parameters inline
+  try {
+    const urlObj = new URL(session.url);
+    if (urlObj.searchParams.toString()) {
+      let paramsHtml = '<div class="summary-params">';
+      urlObj.searchParams.forEach((val, key) => {
+        paramsHtml += `<span class="param-chip"><strong>${escapeHtml(key)}</strong>=${escapeHtml(val)}</span>`;
+      });
+      paramsHtml += '</div>';
+      html += summaryRow('Query Params', paramsHtml);
+    }
+  } catch (e) {}
+
+  html += '</div></div>';
+
+  // === Response (Incoming ←) Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title"><span class="direction-in">← Incoming Response</span></div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('Status', `<span class="${getStatusClass(session.statusCode)}">${session.statusCode || '—'} ${session.statusMessage || ''}</span>`);
+  html += summaryRow('Response Size', formatBytes(session.responseSize));
+  html += summaryRow('Content-Type', session.mimeType ? escapeHtml(session.mimeType) : '<span class="text-muted">—</span>');
+  
+  const resEncoding = session.responseHeaders?.['content-encoding'];
+  if (resEncoding) {
+    html += summaryRow('Encoding', `<span class="badge badge-info">${escapeHtml(resEncoding)}</span>`);
+  }
+
+  const transferEncoding = session.responseHeaders?.['transfer-encoding'];
+  if (transferEncoding) {
+    html += summaryRow('Transfer-Encoding', escapeHtml(transferEncoding));
+  }
+
+  const contentLength = session.responseHeaders?.['content-length'];
+  if (contentLength) {
+    html += summaryRow('Content-Length', `${formatBytes(parseInt(contentLength))} (${contentLength} bytes)`);
+  }
+
+  // Cache headers
+  const cacheControl = session.responseHeaders?.['cache-control'];
+  const expires = session.responseHeaders?.['expires'];
+  const etag = session.responseHeaders?.['etag'];
+  const lastModified = session.responseHeaders?.['last-modified'];
+  const age = session.responseHeaders?.['age'];
+
+  if (cacheControl || expires || etag) {
+    html += '<tr><td colspan="2" class="summary-subsection">Cache Info</td></tr>';
+    if (cacheControl) {
+      const isNoCache = cacheControl.includes('no-cache') || cacheControl.includes('no-store');
+      html += summaryRow('Cache-Control', `<span class="${isNoCache ? 'text-warning' : 'text-success'}">${escapeHtml(cacheControl)}</span>`);
+    }
+    if (expires) html += summaryRow('Expires', escapeHtml(expires));
+    if (etag) html += summaryRow('ETag', `<code>${escapeHtml(etag)}</code>`);
+    if (lastModified) html += summaryRow('Last-Modified', escapeHtml(lastModified));
+    if (age) html += summaryRow('Age', `${age} seconds`);
+  }
+
+  // Security headers
+  const csp = session.responseHeaders?.['content-security-policy'];
+  const cors = session.responseHeaders?.['access-control-allow-origin'];
+  const hsts = session.responseHeaders?.['strict-transport-security'];
+  const xFrame = session.responseHeaders?.['x-frame-options'];
+  const xContent = session.responseHeaders?.['x-content-type-options'];
+
+  if (cors || hsts || xFrame || csp) {
+    html += '<tr><td colspan="2" class="summary-subsection">Security</td></tr>';
+    if (cors) html += summaryRow('CORS', `<span class="badge badge-info">${escapeHtml(cors)}</span>`);
+    if (hsts) html += summaryRow('HSTS', '<span class="badge badge-success">Enabled</span>');
+    if (xFrame) html += summaryRow('X-Frame-Options', escapeHtml(xFrame));
+    if (xContent) html += summaryRow('X-Content-Type', escapeHtml(xContent));
+  }
+
+  // Server info
+  const server = session.responseHeaders?.['server'];
+  const poweredBy = session.responseHeaders?.['x-powered-by'];
+  if (server || poweredBy) {
+    if (server) html += summaryRow('Server', escapeHtml(server));
+    if (poweredBy) html += summaryRow('Powered By', escapeHtml(poweredBy));
+  }
+
+  // Redirect info
+  const location = session.responseHeaders?.['location'];
+  if (location) {
+    html += summaryRow('Redirect To', `<a class="summary-link">${escapeHtml(location)}</a>`);
+  }
+  if (session.isRedirected) {
+    html += summaryRow('Redirected From', escapeHtml(session.originalUrl || '—'));
+  }
+  if (session.isBlocked) {
+    html += summaryRow('Blocked', '<span class="badge badge-error">🚫 Blocked by Rule</span>');
+  }
+
+  // Set-Cookie count
+  const setCookie = session.responseHeaders?.['set-cookie'];
+  if (setCookie) {
+    const cookieCount = Array.isArray(setCookie) ? setCookie.length : 1;
+    html += summaryRow('Cookies Set', `<span class="badge badge-info">${cookieCount} cookie${cookieCount > 1 ? 's' : ''}</span>`);
+  }
+
+  html += '</div></div>';
+
+  // === Timing Section ===
+  html += '<div class="summary-section">';
+  html += '<div class="summary-section-title">⏱ Timing</div>';
+  html += '<div class="summary-grid">';
+  html += summaryRow('Total Duration', `<strong>${formatDuration(session.duration)}</strong>`);
+  if (session.requestTimestamp) {
+    html += summaryRow('Request Sent', new Date(session.requestTimestamp).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 }));
+  }
+  if (session.responseTimestamp) {
+    html += summaryRow('Response Received', new Date(session.responseTimestamp).toLocaleTimeString(undefined, { hour12: false, fractionalSecondDigits: 3 }));
+  }
+
+  // Visual duration bar
+  if (session.duration) {
+    const durationColor = session.duration < 200 ? 'var(--status-success)' : session.duration < 1000 ? 'var(--text-accent)' : session.duration < 3000 ? 'var(--status-warning)' : 'var(--status-error)';
+    const barPct = Math.min(100, (session.duration / 5000) * 100);
+    html += `<div class="summary-label">Speed:</div><div class="summary-value">
+      <div class="summary-duration-bar"><div class="summary-duration-fill" style="width:${barPct}%;background:${durationColor}"></div></div>
+      <span class="summary-duration-label">${session.duration < 200 ? 'Fast' : session.duration < 1000 ? 'Normal' : session.duration < 3000 ? 'Slow' : 'Very Slow'}</span>
+    </div>`;
+  }
+  html += '</div></div>';
+
   return html;
 }
 
@@ -834,6 +1021,183 @@ function renderBody(body, contentType) {
 
   // Default text view
   return `<div class="code-view">${escapeHtml(body)}</div>`;
+}
+
+function renderPreview(session) {
+  const ct = (session.responseHeaders?.['content-type'] || session.mimeType || '').toLowerCase();
+  const body = session.responseBody;
+
+  // HTTPS tunnel — no content
+  if (session.isTunnel) {
+    return `<div class="detail-empty">
+      <div class="preview-no-content">
+        <svg viewBox="0 0 24 24" width="48" height="48" style="opacity:0.3;margin-bottom:12px;">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke="currentColor" fill="none" stroke-width="2"/>
+        </svg>
+        <p>HTTPS Tunnel — Encrypted content not available</p>
+        <p class="preview-hint">HTTPS tunnel connections cannot be previewed without MITM decryption</p>
+      </div>
+    </div>`;
+  }
+
+  if (!body) {
+    return `<div class="detail-empty"><p>No response body to preview</p></div>`;
+  }
+
+  // Image preview
+  if (ct.includes('image/')) {
+    const mimeType = ct.split(';')[0].trim();
+    return `<div class="preview-container preview-image-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">🖼 Image Preview</span>
+        <span class="preview-meta">${mimeType} — ${formatBytes(session.responseSize)}</span>
+      </div>
+      <div class="preview-image-wrapper">
+        <img id="preview-image" class="preview-image" alt="Response image preview" />
+      </div>
+    </div>`;
+  }
+
+  // HTML preview in sandboxed iframe
+  if (ct.includes('html') || (body && (body.trim().startsWith('<!DOCTYPE') || body.trim().startsWith('<html')))) {
+    return `<div class="preview-container preview-html-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">🌐 HTML Preview</span>
+        <span class="preview-meta">${formatBytes(session.responseSize)}</span>
+        <div class="preview-actions">
+          <button class="preview-btn" id="preview-toggle-source" title="Toggle Source">
+            <svg viewBox="0 0 24 24" width="14" height="14"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6" stroke="currentColor" fill="none" stroke-width="2"/></svg>
+            Source
+          </button>
+        </div>
+      </div>
+      <iframe id="preview-iframe" class="preview-iframe" sandbox="allow-same-origin" title="HTML Preview"></iframe>
+      <div id="preview-source" class="preview-source hidden">
+        <div class="code-view">${syntaxHighlightHTML(body)}</div>
+      </div>
+    </div>`;
+  }
+
+  // JSON preview (formatted)
+  if (ct.includes('json') || looksLikeJSON(body)) {
+    try {
+      const parsed = JSON.parse(body);
+      const pretty = JSON.stringify(parsed, null, 2);
+      return `<div class="preview-container">
+        <div class="preview-toolbar">
+          <span class="preview-badge">📋 JSON Preview</span>
+          <span class="preview-meta">${formatBytes(session.responseSize)} — ${Object.keys(parsed).length} top-level keys</span>
+          <div class="preview-actions">
+            <button class="preview-btn" onclick="navigator.clipboard.writeText(${escapeHtml(JSON.stringify(pretty))})">Copy</button>
+          </div>
+        </div>
+        <div class="code-view json-preview">${syntaxHighlightJSON(pretty)}</div>
+      </div>`;
+    } catch (e) {
+      // fall through
+    }
+  }
+
+  // XML preview
+  if (ct.includes('xml') || body.trim().startsWith('<?xml')) {
+    return `<div class="preview-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">📄 XML Preview</span>
+        <span class="preview-meta">${formatBytes(session.responseSize)}</span>
+      </div>
+      <div class="code-view xml-preview">${syntaxHighlightXML(body)}</div>
+    </div>`;
+  }
+
+  // CSS preview
+  if (ct.includes('css')) {
+    return `<div class="preview-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">🎨 CSS Preview</span>
+        <span class="preview-meta">${formatBytes(session.responseSize)}</span>
+      </div>
+      <div class="code-view">${escapeHtml(body)}</div>
+    </div>`;
+  }
+
+  // JavaScript preview
+  if (ct.includes('javascript') || ct.includes('ecmascript')) {
+    return `<div class="preview-container">
+      <div class="preview-toolbar">
+        <span class="preview-badge">⚡ JavaScript Preview</span>
+        <span class="preview-meta">${formatBytes(session.responseSize)}</span>
+      </div>
+      <div class="code-view">${escapeHtml(body)}</div>
+    </div>`;
+  }
+
+  // Plain text fallback
+  return `<div class="preview-container">
+    <div class="preview-toolbar">
+      <span class="preview-badge">📝 Text Preview</span>
+      <span class="preview-meta">${formatBytes(session.responseSize)}</span>
+    </div>
+    <div class="code-view">${escapeHtml(body)}</div>
+  </div>`;
+}
+
+function setupPreviewFrame(session) {
+  const ct = (session.responseHeaders?.['content-type'] || session.mimeType || '').toLowerCase();
+  const body = session.responseBody;
+
+  // HTML iframe setup
+  if (ct.includes('html') || (body && (body.trim().startsWith('<!DOCTYPE') || body.trim().startsWith('<html')))) {
+    requestAnimationFrame(() => {
+      const iframe = document.getElementById('preview-iframe');
+      if (!iframe) return;
+
+      // Create blob URL for HTML content
+      const blob = new Blob([body], { type: 'text/html' });
+      const blobUrl = URL.createObjectURL(blob);
+      iframe.src = blobUrl;
+
+      // Cleanup blob URL after load
+      iframe.addEventListener('load', () => {
+        URL.revokeObjectURL(blobUrl);
+      }, { once: true });
+
+      // Toggle source view
+      const toggleBtn = document.getElementById('preview-toggle-source');
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', () => {
+          const source = document.getElementById('preview-source');
+          const frame = document.getElementById('preview-iframe');
+          if (source && frame) {
+            const isSourceVisible = !source.classList.contains('hidden');
+            source.classList.toggle('hidden');
+            frame.classList.toggle('hidden');
+            toggleBtn.textContent = isSourceVisible ? '‹/› Source' : '🌐 Preview';
+          }
+        });
+      }
+    });
+  }
+
+  // Image data setup
+  if (ct.includes('image/')) {
+    requestAnimationFrame(() => {
+      const img = document.getElementById('preview-image');
+      if (!img || !body) return;
+
+      // Try to create data URL from body
+      const mimeType = ct.split(';')[0].trim();
+      try {
+        // If body is base64 or binary, create blob
+        const encoder = new TextEncoder();
+        const data = encoder.encode(body);
+        const blob = new Blob([data], { type: mimeType });
+        img.src = URL.createObjectURL(blob);
+        img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+      } catch (e) {
+        img.alt = 'Could not render image preview';
+      }
+    });
+  }
 }
 
 function renderCookies(session) {

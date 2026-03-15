@@ -311,7 +311,10 @@ class ProxyEngine {
             responseBody: responseBody.toString('utf-8'),
             requestSize: requestBody.length,
             responseSize: responseBody.length,
-            duration: duration
+            duration: duration,
+            requestTimestamp: startTime,
+            remoteAddress: proxyRes.socket?.remoteAddress,
+            remotePort: proxyRes.socket?.remotePort
           });
 
           if (this.onRequest) {
@@ -342,7 +345,8 @@ class ProxyEngine {
           requestSize: requestBody.length,
           responseSize: 0,
           duration: Date.now() - startTime,
-          error: err.message
+          error: err.message,
+          requestTimestamp: startTime
         });
 
         if (this.onRequest) {
@@ -413,7 +417,8 @@ class ProxyEngine {
           requestSize: requestSize,
           responseSize: responseSize,
           duration: duration,
-          isTunnel: true
+          isTunnel: true,
+          requestTimestamp: startTime
         });
 
         if (this.onRequest) {
@@ -449,7 +454,8 @@ class ProxyEngine {
         requestSize: 0,
         responseSize: 0,
         duration: Date.now() - startTime,
-        error: err.message
+        error: err.message,
+        requestTimestamp: startTime
       });
 
       if (this.onRequest) {
@@ -467,6 +473,7 @@ class ProxyEngine {
   }
 
   _createSession(data) {
+    const now = Date.now();
     return {
       id: data.id,
       method: data.method,
@@ -486,7 +493,12 @@ class ProxyEngine {
       error: data.error || null,
       isTunnel: data.isTunnel || false,
       contentType: this._getContentType(data.responseHeaders),
-      mimeType: this._getMimeType(data.responseHeaders)
+      mimeType: this._getMimeType(data.responseHeaders),
+      timestamp: now,
+      requestTimestamp: data.requestTimestamp || (now - (data.duration || 0)),
+      responseTimestamp: now,
+      remoteAddress: data.remoteAddress || null,
+      remotePort: data.remotePort || null
     };
   }
 
